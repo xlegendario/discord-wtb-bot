@@ -202,26 +202,27 @@ app.post('/', async (req, res) => {
     const skuMain = getFirstValue(sku);
     const skuSoftVal = getFirstValue(sku_soft);
 
-    // Build embed WITHOUT order number (you requested order number be used only for naming)
-    const embed = new EmbedBuilder()
-      .setTitle(`🛒 WTB Request`)
-      .setColor('#2ecc71')
-      .setDescription(
-        `**Item Details**\n` +
-        (brandName ? `Brand: ${brandName}\n` : '') +
-        (name ? `Product: ${name}\n` : '') +
-        (skuMain ? `SKU: ${skuMain}\n` : '') +
-        (skuSoftVal ? `SKU Soft: ${skuSoftVal}\n` : '') +
-        (sizeStr ? `Size: ${sizeStr}\n` : '') +
-        `\nClick the button below to open a private WTB channel.`
-      );
+        // Build minimal, stacked lines like your screenshot
+    const lines = [
+      name ? `**${name}**` : null,
+      skuMain || null,
+      (skuSoftVal && skuSoftVal !== skuMain) ? skuSoftVal : null,
+      sizeStr || null,
+      brandName || null,
+    ].filter(Boolean).join('\n');
 
-     // 🔗 Add product image if provided (prefers picture_url, falls back to image_url)
-     const rawPic = getFirstValue(picture_url || image_url);
-     if (rawPic && /^https?:\/\//i.test(rawPic)) {
-       embed.setImage(rawPic);     // big image
-       // or: embed.setThumbnail(rawPic); // small square thumbnail (use this instead if you prefer)
-     }
+    const embed = new EmbedBuilder()
+      .setTitle('🚨 NEW DEAL 🚨')
+      .setColor('#f1c40f') // yellow accent bar
+      .setDescription(lines);
+
+    // Add product image if provided (prefers picture_url, falls back to image_url)
+    const rawPic = getFirstValue(picture_url || image_url);
+    if (rawPic && /^https?:\/\//i.test(rawPic)) {
+      embed.setImage(rawPic); // big image under the embed
+      // If you prefer a small square instead, use: embed.setThumbnail(rawPic);
+    }
+
 
     // Button carries order number only; channel name will be "<prefix>-<order>-<username>"
     const orderForButton = getFirstValue(order_number) || String(Date.now());
