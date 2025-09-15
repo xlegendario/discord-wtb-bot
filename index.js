@@ -13,9 +13,12 @@ import {
   PermissionsBitField,
 } from 'discord.js';
 
+// If you run Node < 18 locally, uncomment next line and install node-fetch
+// import fetch from 'node-fetch';
+
 dotenv.config();
 
-// Helpers
+// ===== Helpers =====
 function getFirstValue(value) {
   return Array.isArray(value) ? (value[0] || "").toString().trim() : (value || "").toString().trim();
 }
@@ -27,15 +30,32 @@ function safeSlug(str) {
     .slice(0, 90);
 }
 
+// Airtable helpers (status gate)
+const AT_API_KEY     = process.env.AIRTABLE_API_KEY || '';
+const AT_BASE_ID     = process.env.AIRTABLE_BASE_ID || '';
+const AT_TABLE_NAME  = process.env.AIRTABLE_TABLE_NAME || '';
+const AT_STATUS_FIELD = process.env.AIRTABLE_STATUS_FIELD || 'Fulfillment Status';
+const AT_ACTIVE_VALUE = process.env.AIRTABLE_ACTIVE_STATUS_VALUE || 'Outsource';
+
+async function getAirtableStatus(recordId) {
+  if (!AT_API_KEY || !AT_BASE_ID || !AT_TABLE_NAME || !recordId) return null;
+  const url = `https://api.airtable.com/v0/${AT_BASE_ID}/${encodeURIComponent(AT_TABLE_NAME)}/${recordId}`;
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${AT_API_KEY}` } });
+  if (!res.ok) return null;
+  const json = await res.json();
+  return json?.fields?.[AT_STATUS_FIELD] ?? null;
+}
+
+// ===== App =====
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Config
 const WTB_INBOX_CHANNEL = process.env.WTB_INBOX_CHANNEL || 'wtb-requests'; // where the button message is posted
-const WTB_PRIVATE_PREFIX = process.env.WTB_PRIVATE_PREFIX || 'wtb';         // prefix for new channel names
-const WTB_STAFF_ROLE_ID = process.env.WTB_STAFF_ROLE_ID || '';              // optional staff role
-const WTB_CATEGORY_ID = process.env.WTB_CATEGORY_ID || '';                  // preferred category for new channels
-const WTB_CATEGORY_NAME = process.env.WTB_CATEGORY_NAME || '';              // fallback by name
+const WTB_PRIVATE_PREFIX = process.env.WTB_PRIVATE_PREFIX || '';           // prefix for new channel names (leave blank per your preference)
+const WTB_STAFF_ROLE_ID = process.env.WTB_STAFF_ROLE_ID || '';            // optional staff role
+const WTB_CATEGORY_ID = process.env.WTB_CATEGORY_ID || '';                // preferred category for new channels
+const WTB_CATEGORY_NAME = process.env.WTB_CATEGORY_NAME || '';            // fallback by name
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.GuildMembers],
@@ -50,13 +70,36 @@ client.login(process.env.DISCORD_TOKEN);
 // -----------------------------
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isButton()) return;
+
   const customId = interaction.customId;
 
-  if (customId.startsWith('open_wtb_')) {
-    // customId format: open_wtb_<orderNumber>
-    const orderNumber = customId.replace('open_wtb_', '').trim();
+  // customId format: open_wtb|<orderNumber>|<recordId>
+  if (customId.startsWith('open_wtb|')) {
+    const parts = customId.split('|');
+    const orderNumber = (parts[1] || '').trim();
+    const recordId = (parts[2] || '').trim();
 
     try {
+      // 1) Gate on Airtable status
+      let status = null;
+      try { status = await getAirtableStatus(recordId); } catch (_) {}
+      const isActive = !status || status === AT_ACTIVE_VALUE; // if we can't read status, allow by default
+
+      // If closed -> disable the button for everyone and tell the clicker
+      if (!isActive) {
+        const disabledRow = new ActionRowBuilder().addComponents(
+          ...interaction.message.components[0].components.map(btn =>
+            ButtonBuilder.from(btn).setDisabled(true)
+          )
+        );
+        await interaction.update({
+          content: `🔒 Deal closed — current status: **${status}**`,
+          components: [disabledRow],
+        });
+        return;
+      }
+
+      // 2) Active -> create/reuse the private channel and DO NOT disable the button
       const guild = await client.guilds.fetch(process.env.DISCORD_GUILD_ID);
       const channels = await guild.channels.fetch();
 
@@ -72,12 +115,12 @@ client.on('interactionCreate', async (interaction) => {
         parentId = inbox?.parentId ?? null;
       }
 
-      // Determine username to include in the new channel name
-      const member = interaction.member || await guild.members.fetch(interaction.user.id);
-      const displayName = member?.nickname || member?.displayName || interaction.user.username;
+      // Username in the new channel name (works without fetching members if intent is disabled)
+      const displayName = interaction.member?.nickname || interaction.user.username;
 
-      // Build new channel name: <prefix>-<orderNumber>-<username>
-      const channelName = safeSlug(`${orderNumber}-${displayName}`);
+      // Build new channel name: <orderNumber>-<username> (prefix optional)
+      const baseName = safeSlug(`${orderNumber}-${displayName}`);
+      const channelName = WTB_PRIVATE_PREFIX ? safeSlug(`${WTB_PRIVATE_PREFIX}-${baseName}`) : baseName;
 
       // Reuse existing channel if name collision
       let target = channels.find(c => c?.type === ChannelType.GuildText && c?.name === channelName);
@@ -135,15 +178,12 @@ client.on('interactionCreate', async (interaction) => {
         });
       }
 
-      // Disable the button and point to the created channel
-      const disabledRow = new ActionRowBuilder().addComponents(
-        ...interaction.message.components[0].components.map(btn => ButtonBuilder.from(btn).setDisabled(true))
-      );
-
-      await interaction.update({
+      // IMPORTANT: keep the button clickable → send an EPHEMERAL reply instead of updating the message
+      await interaction.reply({
         content: `✅ Opened WTB channel: <#${target.id}>`,
-        components: [disabledRow],
+        ephemeral: true,
       });
+
     } catch (err) {
       console.error('❌ Failed to open WTB channel:', err);
       if (interaction.deferred || interaction.replied) {
@@ -177,7 +217,9 @@ app.post('/', async (req, res) => {
     sku_soft,
     size,
     brand,
-    picture_url
+    picture_url,
+    image_url,
+    record_id         // ← include this so the button can check Airtable
   } = req.body;
 
   if (trigger_type !== 'send-wtb-webhook') {
@@ -202,7 +244,7 @@ app.post('/', async (req, res) => {
     const skuMain = getFirstValue(sku);
     const skuSoftVal = getFirstValue(sku_soft);
 
-        // Build minimal, stacked lines like your screenshot
+    // Build minimal, stacked lines like your screenshot
     const lines = [
       name ? `**${name}**` : null,
       skuMain || null,
@@ -220,16 +262,16 @@ app.post('/', async (req, res) => {
     const rawPic = getFirstValue(picture_url || image_url);
     if (rawPic && /^https?:\/\//i.test(rawPic)) {
       embed.setImage(rawPic); // big image under the embed
-      // If you prefer a small square instead, use: embed.setThumbnail(rawPic);
     }
 
-
-    // Button carries order number only; channel name will be "<prefix>-<order>-<username>"
+    // Button carries order number and record id (for Airtable status check)
     const orderForButton = getFirstValue(order_number) || String(Date.now());
+    const recordForButton = getFirstValue(record_id) || '';
+    const customId = `open_wtb|${orderForButton}|${recordForButton}`;
 
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
-        .setCustomId(`open_wtb_${orderForButton}`)
+        .setCustomId(customId)
         .setLabel('Open WTB Ticket')
         .setStyle(ButtonStyle.Success)
     );
