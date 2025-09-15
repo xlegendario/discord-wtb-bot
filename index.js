@@ -93,7 +93,7 @@ client.on('interactionCreate', async (interaction) => {
           )
         );
         await interaction.update({
-          content: `🔒 Deal closed — current status: **${status}**`,
+          content: `🚫 WTB closed — this item is no longer needed`,
           components: [disabledRow],
         });
         return;
@@ -167,7 +167,7 @@ client.on('interactionCreate', async (interaction) => {
         });
 
         await target.send(
-          `👋 Welcome <@${interaction.user.id}>! This private WTB channel for **Order ${orderNumber}** is now open.`
+          `👋 Welcome <@${interaction.user.id}> and thank you for opening this WTB ticket! Please share us your offer for **${name} - ${sizeStr}** below, a staff member will come to your shortly.`
         );
       } else {
         // Ensure the clicker has access if channel existed
