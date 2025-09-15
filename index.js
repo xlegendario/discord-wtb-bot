@@ -15,12 +15,11 @@ import {
 
 dotenv.config();
 
+// Helpers
 function getFirstValue(value) {
   return Array.isArray(value) ? (value[0] || "").toString().trim() : (value || "").toString().trim();
 }
-
-// Slugify a safe channel name (lowercase, dash-separated)
-function safeChannelName(str) {
+function safeSlug(str) {
   return String(str || '')
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
@@ -31,20 +30,19 @@ function safeChannelName(str) {
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Config (override via env)
-const WTB_INBOX_CHANNEL = process.env.WTB_INBOX_CHANNEL || 'wtb-requests'; // where the inbox button is posted
-const WTB_PRIVATE_PREFIX = process.env.WTB_PRIVATE_PREFIX || 'wtb';         // prefix for new private channels
-const WTB_STAFF_ROLE_ID = process.env.WTB_STAFF_ROLE_ID || '';              // optional: role that always has access
+// Config
+const WTB_INBOX_CHANNEL = process.env.WTB_INBOX_CHANNEL || 'wtb-requests'; // where the button message is posted
+const WTB_PRIVATE_PREFIX = process.env.WTB_PRIVATE_PREFIX || 'wtb';         // prefix for new channel names
+const WTB_STAFF_ROLE_ID = process.env.WTB_STAFF_ROLE_ID || '';              // optional staff role
+const WTB_CATEGORY_ID = process.env.WTB_CATEGORY_ID || '';                  // preferred category for new channels
+const WTB_CATEGORY_NAME = process.env.WTB_CATEGORY_NAME || '';              // fallback by name
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages],
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.GuildMembers],
   partials: [Partials.Channel],
 });
 
-client.on('ready', () => {
-  console.log(`✅ Logged in as ${client.user.tag}`);
-});
-
+client.on('ready', () => console.log(`✅ Logged in as ${client.user.tag}`));
 client.login(process.env.DISCORD_TOKEN);
 
 // -----------------------------
@@ -55,76 +53,81 @@ client.on('interactionCreate', async (interaction) => {
   const customId = interaction.customId;
 
   if (customId.startsWith('open_wtb_')) {
-    const payloadId = customId.replace('open_wtb_', '');
+    // customId format: open_wtb_<orderNumber>
+    const orderNumber = customId.replace('open_wtb_', '').trim();
 
     try {
-      const guildId = process.env.DISCORD_GUILD_ID; // single-guild version
-      const guild = await client.guilds.fetch(guildId);
+      const guild = await client.guilds.fetch(process.env.DISCORD_GUILD_ID);
       const channels = await guild.channels.fetch();
 
-      // Locate inbox channel (e.g., #wtb-requests)
-      const inboxChannel = channels.find((c) => c?.name === WTB_INBOX_CHANNEL);
-      const parentId = inboxChannel?.parentId ?? null;
+      // Find target parent category (ID first, then name, else fall back to inbox parent)
+      let parentId = null;
+      if (WTB_CATEGORY_ID) parentId = WTB_CATEGORY_ID;
+      else if (WTB_CATEGORY_NAME) {
+        const cat = channels.find(c => c?.type === ChannelType.GuildCategory && c?.name === WTB_CATEGORY_NAME);
+        if (cat) parentId = cat.id;
+      }
+      if (!parentId) {
+        const inbox = channels.find(c => c?.name === WTB_INBOX_CHANNEL);
+        parentId = inbox?.parentId ?? null;
+      }
 
-      // Derive a readable channel name from the embed title or payload id
-      const embeds = interaction.message.embeds || [];
-      const title = embeds[0]?.title || '';
-      const orderNoMatch = title.match(/#(\w[\w-]*)/); // “WTB Request #12345”
-      const orderPart = orderNoMatch ? `-${orderNoMatch[1]}` : '';
-      const channelName = safeChannelName(`${WTB_PRIVATE_PREFIX}${orderPart || `-${String(payloadId).slice(-6)}`}`);
+      // Determine username to include in the new channel name
+      const member = interaction.member || await guild.members.fetch(interaction.user.id);
+      const displayName = member?.nickname || member?.displayName || interaction.user.username;
 
-      // If exists, reuse; else create
-      let target = channels.find((c) => c?.name === channelName && c?.type === ChannelType.GuildText);
+      // Build new channel name: <prefix>-<orderNumber>-<username>
+      const channelName = safeSlug(`${WTB_PRIVATE_PREFIX}-${orderNumber}-${displayName}`);
+
+      // Reuse existing channel if name collision
+      let target = channels.find(c => c?.type === ChannelType.GuildText && c?.name === channelName);
+
+      // Permission overwrites for private channel
+      const overwrites = [
+        { id: guild.roles.everyone, deny: [PermissionsBitField.Flags.ViewChannel] },
+        {
+          id: interaction.user.id,
+          allow: [
+            PermissionsBitField.Flags.ViewChannel,
+            PermissionsBitField.Flags.SendMessages,
+            PermissionsBitField.Flags.ReadMessageHistory,
+          ],
+        },
+        {
+          id: client.user.id,
+          allow: [
+            PermissionsBitField.Flags.ViewChannel,
+            PermissionsBitField.Flags.SendMessages,
+            PermissionsBitField.Flags.ReadMessageHistory,
+            PermissionsBitField.Flags.ManageChannels,
+          ],
+        },
+      ];
+      if (WTB_STAFF_ROLE_ID) {
+        overwrites.push({
+          id: WTB_STAFF_ROLE_ID,
+          allow: [
+            PermissionsBitField.Flags.ViewChannel,
+            PermissionsBitField.Flags.SendMessages,
+            PermissionsBitField.Flags.ReadMessageHistory,
+          ],
+        });
+      }
 
       if (!target) {
-        const overwrites = [
-          // Hide from everyone by default
-          { id: guild.roles.everyone, deny: [PermissionsBitField.Flags.ViewChannel] },
-          // Let the clicker in
-          {
-            id: interaction.user.id,
-            allow: [
-              PermissionsBitField.Flags.ViewChannel,
-              PermissionsBitField.Flags.SendMessages,
-              PermissionsBitField.Flags.ReadMessageHistory,
-            ],
-          },
-          // Allow the bot
-          {
-            id: client.user.id,
-            allow: [
-              PermissionsBitField.Flags.ViewChannel,
-              PermissionsBitField.Flags.SendMessages,
-              PermissionsBitField.Flags.ReadMessageHistory,
-              PermissionsBitField.Flags.ManageChannels,
-            ],
-          },
-        ];
-
-        if (WTB_STAFF_ROLE_ID) {
-          overwrites.push({
-            id: WTB_STAFF_ROLE_ID,
-            allow: [
-              PermissionsBitField.Flags.ViewChannel,
-              PermissionsBitField.Flags.SendMessages,
-              PermissionsBitField.Flags.ReadMessageHistory,
-            ],
-          });
-        }
-
         target = await guild.channels.create({
           name: channelName,
           type: ChannelType.GuildText,
           parent: parentId || undefined,
           permissionOverwrites: overwrites,
-          reason: `WTB channel opened by ${interaction.user.tag} via button`,
+          reason: `WTB channel opened by ${interaction.user.tag} for order ${orderNumber}`,
         });
 
         await target.send(
-          `👋 Welcome <@${interaction.user.id}>! This private WTB channel is now open. A team member will be with you shortly.`
+          `👋 Welcome <@${interaction.user.id}>! This private WTB channel for **Order ${orderNumber}** is now open.`
         );
       } else {
-        // Ensure the clicker has access if channel already existed
+        // Ensure the clicker has access if channel existed
         await target.permissionOverwrites.edit(interaction.user.id, {
           ViewChannel: true,
           SendMessages: true,
@@ -132,11 +135,9 @@ client.on('interactionCreate', async (interaction) => {
         });
       }
 
-      // Disable the button and link the new channel
+      // Disable the button and point to the created channel
       const disabledRow = new ActionRowBuilder().addComponents(
-        ...interaction.message.components[0].components.map((btn) =>
-          ButtonBuilder.from(btn).setDisabled(true)
-        )
+        ...interaction.message.components[0].components.map(btn => ButtonBuilder.from(btn).setDisabled(true))
       );
 
       await interaction.update({
@@ -160,7 +161,7 @@ app.use(bodyParser.json());
 // Webhook endpoint
 // -----------------------------
 app.post('/', async (req, res) => {
-  // Optional: protect with a shared secret
+  // Optional protection: shared secret
   if (process.env.WEBHOOK_SECRET) {
     const auth = req.get('authorization') || '';
     if (auth !== `Bearer ${process.env.WEBHOOK_SECRET}`) {
@@ -170,13 +171,12 @@ app.post('/', async (req, res) => {
 
   const {
     trigger_type,
-    store_name,
+    order_number,     // used ONLY for naming the channel
     product_name,
-    size,
     sku,
-    shopify_order_number,
-    record_id,
-    selling_price,
+    sku_soft,
+    size,
+    brand
   } = req.body;
 
   if (trigger_type !== 'send-wtb-webhook') {
@@ -187,43 +187,40 @@ app.post('/', async (req, res) => {
     const guild = await client.guilds.fetch(process.env.DISCORD_GUILD_ID);
     const channels = await guild.channels.fetch();
 
-    const storeName = getFirstValue(store_name);
-
-    // Prefer inbox under the store’s category (if you group by store). Otherwise any channel with that name.
-    let inbox = channels.find(
-      (c) =>
-        c?.name === WTB_INBOX_CHANNEL &&
-        c?.parent?.name?.toLowerCase() === storeName?.toLowerCase()
-    );
-    if (!inbox) inbox = channels.find((c) => c?.name === WTB_INBOX_CHANNEL);
-
+    // Find the inbox channel (by name anywhere in the guild)
+    const inbox = channels.find(c => c?.name === WTB_INBOX_CHANNEL);
     if (!inbox) {
-      console.error('❌ WTB inbox channel not found.');
+      console.error('❌ Inbox channel not found.');
       return res.status(404).json({ error: 'WTB inbox channel not found' });
     }
 
+    // Clean values for the embed
     const name = getFirstValue(product_name);
+    const brandName = getFirstValue(brand);
     const sizeStr = getFirstValue(size);
-    const skuStr = getFirstValue(sku);
-    const orderNo = getFirstValue(shopify_order_number);
-    const idForButton = record_id || orderNo || String(Date.now());
+    const skuMain = getFirstValue(sku);
+    const skuSoftVal = getFirstValue(sku_soft);
 
+    // Build embed WITHOUT order number (you requested order number be used only for naming)
     const embed = new EmbedBuilder()
-      .setTitle(`🛒 WTB Request #${orderNo || record_id || '—'}`)
+      .setTitle(`🛒 WTB Request`)
       .setColor('#2ecc71')
       .setDescription(
         `**Item Details**\n` +
-          `${name || '—'}\n` +
-          (skuStr ? `SKU: ${skuStr}\n` : '') +
-          (sizeStr ? `Size: ${sizeStr}\n` : '') +
-          (selling_price ? `Target / Price: €${selling_price}\n` : '') +
-          `\nClick the button below to open a private WTB channel.`
-      )
-      .setFooter({ text: `store: ${storeName || '-'}  •  id: ${record_id || '-'}` });
+        (brandName ? `Brand: ${brandName}\n` : '') +
+        (name ? `Product: ${name}\n` : '') +
+        (skuMain ? `SKU: ${skuMain}\n` : '') +
+        (skuSoftVal ? `SKU Soft: ${skuSoftVal}\n` : '') +
+        (sizeStr ? `Size: ${sizeStr}\n` : '') +
+        `\nClick the button below to open a private WTB channel.`
+      );
+
+    // Button carries order number only; channel name will be "<prefix>-<order>-<username>"
+    const orderForButton = getFirstValue(order_number) || String(Date.now());
 
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
-        .setCustomId(`open_wtb_${idForButton}`)
+        .setCustomId(`open_wtb_${orderForButton}`)
         .setLabel('Open WTB Channel')
         .setStyle(ButtonStyle.Success)
     );
