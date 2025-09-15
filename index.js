@@ -77,7 +77,7 @@ client.on('interactionCreate', async (interaction) => {
       const displayName = member?.nickname || member?.displayName || interaction.user.username;
 
       // Build new channel name: <prefix>-<orderNumber>-<username>
-      const channelName = safeSlug(`${WTB_PRIVATE_PREFIX}-${orderNumber}-${displayName}`);
+      const channelName = safeSlug(`${orderNumber}-${displayName}`);
 
       // Reuse existing channel if name collision
       let target = channels.find(c => c?.type === ChannelType.GuildText && c?.name === channelName);
@@ -176,7 +176,8 @@ app.post('/', async (req, res) => {
     sku,
     sku_soft,
     size,
-    brand
+    brand,
+    picture_url
   } = req.body;
 
   if (trigger_type !== 'send-wtb-webhook') {
@@ -215,13 +216,20 @@ app.post('/', async (req, res) => {
         `\nClick the button below to open a private WTB channel.`
       );
 
+     // 🔗 Add product image if provided (prefers picture_url, falls back to image_url)
+     const rawPic = getFirstValue(picture_url || image_url);
+     if (rawPic && /^https?:\/\//i.test(rawPic)) {
+       embed.setImage(rawPic);     // big image
+       // or: embed.setThumbnail(rawPic); // small square thumbnail (use this instead if you prefer)
+     }
+
     // Button carries order number only; channel name will be "<prefix>-<order>-<username>"
     const orderForButton = getFirstValue(order_number) || String(Date.now());
 
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setCustomId(`open_wtb_${orderForButton}`)
-        .setLabel('Open WTB Channel')
+        .setLabel('Open WTB Ticket')
         .setStyle(ButtonStyle.Success)
     );
 
