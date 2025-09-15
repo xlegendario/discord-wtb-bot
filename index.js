@@ -166,9 +166,31 @@ client.on('interactionCreate', async (interaction) => {
           reason: `WTB channel opened by ${interaction.user.tag} for order ${orderNumber}`,
         });
 
-        await target.send(
-          `👋 Welcome <@${interaction.user.id}> and thank you for opening this WTB ticket! Please share us your offer for **${name} - ${sizeStr}** below, a staff member will come to your shortly.`
-        );
+        // Pull product + size from the original embed description
+        const emb = interaction.message.embeds?.[0];
+        let productName = '';
+        let sizeText = '';
+
+        if (emb?.description) {
+          const lines = emb.description.split('\n').map(s => s.trim()).filter(Boolean);
+          // Our embed format is:
+          //   0: **Product Name**
+          //   1: SKU
+          //   2: (optional) SKU Soft (if different)
+          //   3 or 2: Size
+          //   last: Brand
+          productName = (lines[0] || '').replace(/\*\*/g, '');
+
+          // Heuristic: find the first line that looks like a size
+          const sizeRegex = /^(?:EU|US|UK|CM|JP|FR|IT)?\s?\d+(?:\.\d+)?$|^(?:XS|S|M|L|XL|XXL|XXXL|OS|One Size|OSFA)$/i;
+          sizeText = lines.find((l, idx) => idx > 0 && sizeRegex.test(l)) || '';
+        }
+
+        const welcomeMsg =
+          `👋 Welcome <@${interaction.user.id}>! Please share your offer for **${productName}${sizeText ? ` - ${sizeText}` : ''}** below; a staff member will be with you shortly.`;
+
+        await target.send(welcomeMsg);
+
       } else {
         // Ensure the clicker has access if channel existed
         await target.permissionOverwrites.edit(interaction.user.id, {
