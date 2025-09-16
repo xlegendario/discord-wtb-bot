@@ -11,6 +11,8 @@ import {
   ButtonStyle,
   ChannelType,
   PermissionsBitField,
+  Events,
+  MessageFlags,
 } from 'discord.js';
 
 // If you run Node < 18 locally, uncomment next line and install node-fetch
@@ -62,7 +64,7 @@ const client = new Client({
   partials: [Partials.Channel],
 });
 
-client.on('ready', () => console.log(`✅ Logged in as ${client.user.tag}`));
+client.once(Events.ClientReady, (c) => console.log(`✅ Logged in as ${c.user.tag}`));
 client.login(process.env.DISCORD_TOKEN);
 
 // -----------------------------
@@ -166,30 +168,38 @@ client.on('interactionCreate', async (interaction) => {
           reason: `WTB channel opened by ${interaction.user.tag} for order ${orderNumber}`,
         });
 
-        // Pull product + size from the original embed description
+        // Pull product + size from the original embed description (ignore CTA line)
         const emb = interaction.message.embeds?.[0];
-        let productName = '';
-        let sizeText = '';
+       let productName = '';
+       let sizeText = '';
 
-        if (emb?.description) {
-          const lines = emb.description.split('\n').map(s => s.trim()).filter(Boolean);
-          // Our embed format is:
-          //   0: **Product Name**
-          //   1: SKU
-          //   2: (optional) SKU Soft (if different)
-          //   3 or 2: Size
-          //   last: Brand
-          productName = (lines[0] || '').replace(/\*\*/g, '');
+       if (emb?.description) {
+         // Split into lines, trim, drop empties
+         const rawLines = emb.description.split('\n').map(s => s.trim()).filter(Boolean);
+         // Remove the CTA line we appended (“Click the button below…”)
+         const lines = rawLines.filter(l => !/click the button/i.test(l));
 
-          // Heuristic: find the first line that looks like a size
-          const sizeRegex = /^(?:EU|US|UK|CM|JP|FR|IT)?\s?\d+(?:\.\d+)?$|^(?:XS|S|M|L|XL|XXL|XXXL|OS|One Size|OSFA)$/i;
-          sizeText = lines.find((l, idx) => idx > 0 && sizeRegex.test(l)) || '';
-        }
+         // Our content lines are:
+         // 0: **Product Name**
+         // 1: SKU
+         // 2: (optional) SKU Soft (if different)
+         // 3: Size
+         // 4: Brand (last)
+         productName = (lines[0] || '').replace(/\*\*/g, '');
 
-        const welcomeMsg =
-          `👋 Welcome <@${interaction.user.id}>! Please share your offer for **${productName}${sizeText ? ` - ${sizeText}` : ''}** below; a staff member will be with you shortly.`;
+         // Take the second-to-last as Size (since last is Brand)
+         if (lines.length >= 4) {
+           sizeText = lines[lines.length - 2];
+         } else if (lines.length >= 3) {
+           // If brand is missing for some reason, size will be the 3rd item
+           sizeText = lines[2];
+         }
+       }
 
-        await target.send(welcomeMsg);
+       const welcomeMsg =
+         `👋 Welcome <@${interaction.user.id}>! Please share your offer for **${productName}${sizeText ? ` - ${sizeText}` : ''}** below; a staff member will be with you shortly.`;
+
+       await target.send(welcomeMsg);
 
       } else {
         // Ensure the clicker has access if channel existed
@@ -203,7 +213,7 @@ client.on('interactionCreate', async (interaction) => {
       // IMPORTANT: keep the button clickable → send an EPHEMERAL reply instead of updating the message
       await interaction.reply({
         content: `✅ Opened WTB channel: <#${target.id}>`,
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
 
     } catch (err) {
@@ -211,7 +221,7 @@ client.on('interactionCreate', async (interaction) => {
       if (interaction.deferred || interaction.replied) {
         await interaction.editReply({ content: '❌ Could not open WTB channel.' });
       } else {
-        await interaction.reply({ content: '❌ Could not open WTB channel.', ephemeral: true });
+        await interaction.reply({ content: '❌ Could not open WTB channel.', flags: MessageFlags.Ephemeral });
       }
     }
   }
