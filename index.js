@@ -278,7 +278,7 @@ app.post('/', async (req, res) => {
     const embed = new EmbedBuilder()
       .setTitle('🚨 NEW DEAL 🚨')
       .setColor('#f1c40f') // yellow accent bar
-      .setDescription(lines);
+      .setDescription(`${lines}\n\nClick the button below to open a ticket and share your offer.`);
 
     // Add product image if provided (prefers picture_url, falls back to image_url)
     const rawPic = getFirstValue(picture_url || image_url);
