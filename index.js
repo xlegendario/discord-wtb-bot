@@ -226,7 +226,7 @@ async function getCurrentLowestForOrder(orderRecordId) {
         vatType: vatTypeNorm
       };
     }
-
+  }
   if (best) return best;
 
   // Fallback: use Final Outsource Buying Price from the order
