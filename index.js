@@ -643,12 +643,6 @@ client.on(Events.InteractionCreate, async interaction => {
         fields['Linked Orders'] = [orderRecordId];
       }
 
-      // Optionally also store product metadata on the offer
-      if (productName) fields['Product Name'] = productName;
-      if (sku)         fields['SKU']         = sku;
-      if (size)        fields['Size']        = size;
-      if (brand)       fields['Brand']       = brand;
-
       await sellerOffersTable.create(fields);
 
       await interaction.reply({
