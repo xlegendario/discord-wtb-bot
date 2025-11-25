@@ -540,7 +540,7 @@ client.on(Events.InteractionCreate, async interaction => {
       const sellerOffersTable = base(sellerOffersTableName);
 
       const fields = {
-        'Partner Offer': offerPrice, // or rename to 'Seller Offer' if you change the field name
+        'Seller Offer': offerPrice, // or rename to 'Seller Offer' if you change the field name
         'Offer Date': new Date().toISOString().split('T')[0],
         'Seller ID': [sellerRecordId]
       };
