@@ -99,16 +99,14 @@ function parseNumericField(value) {
  */
 function normalizeVatType(raw) {
   if (!raw) return null;
-  const v = raw.trim(); // no toUpperCase, keep exact
+  const v = raw.trim(); // keep exact, case-sensitive for now
 
-  // Only EXACTLY these 3 are allowed:
   if (v === 'Margin') return 'Margin';
   if (v === 'VAT0')   return 'VAT0';
   if (v === 'VAT21')  return 'VAT21';
 
-  return null; // everything else is invalid
+  return null;
 }
-
 
 /**
  * Compute normalized offer based on VAT type.
@@ -142,7 +140,6 @@ function buildOfferOnlyRow(disabled = false) {
  * Uses the comma-separated "Seller Offer Message ID" field on Orders.
  */
 async function disableSellerOfferMessagesForRecord(orderRecordId) {
-  // Load order
   const orderRecord = await base(ordersTableName).find(orderRecordId);
   if (!orderRecord) {
     console.warn(`⚠️ Order record not found for disable: ${orderRecordId}`);
@@ -165,7 +162,6 @@ async function disableSellerOfferMessagesForRecord(orderRecordId) {
     return;
   }
 
-  // For each deal channel & each message ID, try to fetch and disable buttons
   for (const channelId of dealsChannelIds) {
     const channel = await client.channels.fetch(channelId).catch(() => null);
     if (!channel || !channel.isTextBased()) continue;
@@ -201,17 +197,27 @@ async function getCurrentLowestForOrder(orderRecordId) {
 
   const sellerOffersTable = base(sellerOffersTableName);
 
-  // Find all Seller Offers linked to this order
-  const offers = await sellerOffersTable.select({
-    filterByFormula: `FIND("${orderRecordId}", ARRAYJOIN({Linked Orders}))`
-  }).firstPage();
+  // Fetch ALL seller offers and filter in JS by Linked Orders' record IDs
+  const allOffers = await sellerOffersTable.select().all();
+
+  const offersForOrder = allOffers.filter(rec => {
+    const links = rec.get('Linked Orders');
+    if (!Array.isArray(links)) return false;
+    return links.some(link => link.id === orderRecordId);
+  });
 
   let best = null;
 
-  for (const rec of offers) {
+  for (const rec of offersForOrder) {
     const price = parseNumericField(rec.get('Seller Offer'));
     const vatTypeRaw = rec.get('Offer VAT Type');
-    const vatTypeNorm = normalizeVatType(vatTypeRaw || '');
+    // Single select → object with .name
+    const vatName =
+      typeof vatTypeRaw === 'string'
+        ? vatTypeRaw
+        : (vatTypeRaw && vatTypeRaw.name) || '';
+
+    const vatTypeNorm = normalizeVatType(vatName);
     const normalized = getNormalizedOffer(price, vatTypeNorm);
 
     if (!Number.isFinite(normalized)) continue;
@@ -225,7 +231,6 @@ async function getCurrentLowestForOrder(orderRecordId) {
     }
   }
 
-  // If we found at least one offer, return it
   if (best) return best;
 
   // Fallback: use Final Outsource Buying Price from the order
@@ -238,7 +243,7 @@ async function getCurrentLowestForOrder(orderRecordId) {
   return {
     normalized: fallbackVal,
     raw: fallbackVal,
-    vatType: 'Margin' // or 'N/A', whatever you prefer
+    vatType: 'Margin' // default label when only fallback is used
   };
 }
 
@@ -258,9 +263,6 @@ app.get('/health', (_req, res) =>
 
 /**
  * POST /partner-offer-deal
- * (and /partner-deal if you want to reuse the same payload)
- *
- * → Offer-only button (no Claim) with simple embed layout.
  */
 async function handleOfferDealPost(req, res) {
   try {
@@ -279,12 +281,6 @@ async function handleOfferDealPost(req, res) {
       return res.status(400).json({ error: 'Missing required fields in payload.' });
     }
 
-    // Simple style like your screenshot:
-    // 🔺 NEW DEAL (OFFER ONLY)
-    // **Product Name**
-    // SKU
-    // Size
-    // Brand
     const lines = [
       productName ? `**${productName}**` : null,
       sku || null,
@@ -326,13 +322,11 @@ async function handleOfferDealPost(req, res) {
       return res.status(500).json({ error: 'No valid deal channels available.' });
     }
 
-    // Store message IDs on the ORDER record as "Seller Offer Message ID"
     if (recordId) {
       try {
         const fieldsToUpdate = {
           [ORDER_FIELD_SELLER_MSG_IDS]: messageIds.join(',')
         };
-        // Optionally track a flag
         if (ORDER_FIELD_BUTTONS_DISABLED) {
           fieldsToUpdate[ORDER_FIELD_BUTTONS_DISABLED] = false;
         }
@@ -350,12 +344,10 @@ async function handleOfferDealPost(req, res) {
 }
 
 app.post('/partner-offer-deal', handleOfferDealPost);
-// If you also want /partner-deal to behave the same (offer-only), keep this:
 app.post('/partner-deal', handleOfferDealPost);
 
 /**
  * POST /seller-offer/disable
- * Body: { recordId } where recordId = Orders table record ID
  */
 app.post('/seller-offer/disable', async (req, res) => {
   try {
@@ -415,7 +407,7 @@ client.on(Events.InteractionCreate, async interaction => {
         return;
       }
 
-      // Try to find the order linked to this message
+      // Find order for this message
       let orderRecordIdForModal = null;
       try {
         const records = await base(ordersTableName)
@@ -429,13 +421,12 @@ client.on(Events.InteractionCreate, async interaction => {
         console.error('Failed to find order by Seller Offer Message ID:', e);
       }
 
-      // Compute current lowest normalized offer (and its raw + VAT type)
+      // Current lowest normalized offer
       let lowestInfo = null;
       if (orderRecordIdForModal) {
         lowestInfo = await getCurrentLowestForOrder(orderRecordIdForModal);
       }
 
-      // Build Offer modal
       const modal = new ModalBuilder()
         .setCustomId(`partner_offer_modal:${messageId}`)
         .setTitle('Enter Seller ID, VAT Type & Offer');
@@ -453,7 +444,6 @@ client.on(Events.InteractionCreate, async interaction => {
         .setStyle(TextInputStyle.Short)
         .setRequired(true)
         .setPlaceholder('Margin / VAT0 / VAT21');
-
 
       let offerPlaceholder;
       if (lowestInfo && typeof lowestInfo.raw === 'number') {
@@ -492,7 +482,7 @@ client.on(Events.InteractionCreate, async interaction => {
       const [prefix, messageId] = interaction.customId.split(':');
 
       if (prefix !== 'partner_offer_modal') {
-        return; // only offer flow exists in this bot
+        return;
       }
 
       const channel = interaction.channel;
@@ -512,13 +502,6 @@ client.on(Events.InteractionCreate, async interaction => {
         return;
       }
 
-      // Our embed description is:
-      // **Product Name**
-      // SKU
-      // Size
-      // Brand
-      // <blank>
-      // Click the button...
       const descLines = embed.description.split('\n').map(l => l.trim()).filter(Boolean);
 
       const productName = (descLines[0] || '').replace(/\*\*/g, '') || '';
@@ -526,7 +509,6 @@ client.on(Events.InteractionCreate, async interaction => {
       const size        = descLines[2] || '';
       const brand       = descLines[3] || '';
 
-      // Find order by Seller Offer Message ID
       let orderRecordId = null;
       try {
         const records = await base(ordersTableName)
@@ -579,7 +561,6 @@ client.on(Events.InteractionCreate, async interaction => {
         return;
       }
 
-      // 🔐 SAFETY: enforce "must be at least MIN_UNDERCUT_STEP lower than Current Lowest Offer"
       let referenceLow = null;
       if (orderRecordId) {
         const lowestInfo = await getCurrentLowestForOrder(orderRecordId);
@@ -605,7 +586,7 @@ client.on(Events.InteractionCreate, async interaction => {
       }
 
       const sellerCode = `SE-${sellerNumberRaw}`;
-      // If you want to still validate seller exists:
+
       const sellersTable = base(sellersTableName);
       let sellerRecordId = null;
       try {
@@ -628,7 +609,6 @@ client.on(Events.InteractionCreate, async interaction => {
         return;
       }
 
-      // Create record in Seller Offers table
       const sellerOffersTable = base(sellerOffersTableName);
 
       const fields = {
