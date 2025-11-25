@@ -1,10 +1,8 @@
-// seller-offers-bot/server.js
-
 import 'dotenv/config';
 import express from 'express';
 import morgan from 'morgan';
 import Airtable from 'airtable';
-import fetch from 'node-fetch'; // currently unused, kept for future use
+import fetch from 'node-fetch'; // kept for potential future use
 import {
   Client,
   GatewayIntentBits,
@@ -88,6 +86,7 @@ client.login(DISCORD_TOKEN);
  * Extract value from description lines like:
  *  "**SKU:** 1234"
  * with label = "**SKU:**"
+ * (currently only used to parse product data from embed)
  */
 function getValueFromLines(lines, label) {
   const line = lines.find(l => l.startsWith(label));
@@ -150,7 +149,7 @@ function buildOfferOnlyRow(disabled = false) {
     new ButtonBuilder()
       .setCustomId('partner_offer')
       .setLabel('Offer')
-      .setStyle(ButtonStyle.Secondary)
+      .setStyle(ButtonStyle.Success)
       .setDisabled(disabled)
   );
 }
@@ -223,7 +222,7 @@ app.get('/health', (_req, res) =>
  * POST /partner-offer-deal
  * (and /partner-deal if you want to reuse the same payload)
  *
- * → Offer-only button (no Claim, no public payout)
+ * → Offer-only button (no Claim) with simple embed layout.
  */
 async function handleOfferDealPost(req, res) {
   try {
@@ -232,7 +231,7 @@ async function handleOfferDealPost(req, res) {
       sku,
       size,
       brand,
-      // startPayout,  // no longer required/used
+      startPayout,  // still accepted but not used in embed
       imageUrl,
       dealId,
       recordId   // Order record ID (Unfulfilled Orders Log)
@@ -242,17 +241,26 @@ async function handleOfferDealPost(req, res) {
       return res.status(400).json({ error: 'Missing required fields in payload.' });
     }
 
-    const descriptionLines = [
-      `**Product Name:** ${productName}`,
-      `**SKU:** ${sku}`,
-      `**Size:** ${size}`,
-      `**Brand:** ${brand}`,
-      dealId ? `**Order ID:** ${dealId}` : null
+    // Simple style like your screenshot:
+    // 🔺 NEW DEAL (OFFER ONLY)
+    // **Product Name**
+    // SKU
+    // Size
+    // Brand
+    const lines = [
+      productName ? `**${productName}**` : null,
+      sku || null,
+      size || null,
+      brand || null
     ].filter(Boolean);
 
+    const description =
+      lines.join('\n') +
+      '\n\nClick the button below to offer us your price on this item.';
+
     const embed = new EmbedBuilder()
-      .setTitle('🧨 NEW DEAL (OFFER ONLY) 🧨')
-      .setDescription(descriptionLines.join('\n'))
+      .setTitle('🚨 NEW DEAL (OFFER ONLY) 🚨')
+      .setDescription(description)
       .setColor(0xf1c40f);
 
     if (imageUrl) {
@@ -369,8 +377,8 @@ client.on(Events.InteractionCreate, async interaction => {
         return;
       }
 
-      // Compute Current Lowest Offer for this order
-      let currentLowestDisplay = 'N/A';
+      // Compute Current Lowest Offer for this order (for display in modal title)
+      let currentLowestDisplay = null;
 
       let orderRecordIdForModal = await findOrderRecordIdByMessageId(messageId);
       if (orderRecordIdForModal) {
@@ -391,10 +399,14 @@ client.on(Events.InteractionCreate, async interaction => {
         }
       }
 
-      // Build Offer modal
+      // Build Offer modal (Current Lowest in title so it can't be edited)
+      const modalTitle = currentLowestDisplay
+        ? `Lowest: ${currentLowestDisplay} — Enter Seller ID & Offer`
+        : 'Enter Seller ID & Offer';
+
       const modal = new ModalBuilder()
         .setCustomId(`partner_offer_modal:${messageId}`)
-        .setTitle('Enter Seller ID & Offer');
+        .setTitle(modalTitle);
 
       const sellerIdInput = new TextInputBuilder()
         .setCustomId('seller_id')
@@ -402,13 +414,6 @@ client.on(Events.InteractionCreate, async interaction => {
         .setStyle(TextInputStyle.Short)
         .setRequired(true)
         .setPlaceholder('00001');
-
-      const currentLowestInput = new TextInputBuilder()
-        .setCustomId('current_lowest_info')
-        .setLabel('Current Lowest Offer (reference)')
-        .setStyle(TextInputStyle.Short)
-        .setRequired(false)
-        .setValue(currentLowestDisplay);
 
       const offerInput = new TextInputBuilder()
         .setCustomId('offer_price')
@@ -418,10 +423,9 @@ client.on(Events.InteractionCreate, async interaction => {
         .setPlaceholder('140');
 
       const row1 = new ActionRowBuilder().addComponents(sellerIdInput);
-      const row2 = new ActionRowBuilder().addComponents(currentLowestInput);
-      const row3 = new ActionRowBuilder().addComponents(offerInput);
+      const row2 = new ActionRowBuilder().addComponents(offerInput);
 
-      modal.addComponents(row1, row2, row3);
+      modal.addComponents(row1, row2);
 
       await interaction.showModal(modal);
       return;
@@ -459,14 +463,21 @@ client.on(Events.InteractionCreate, async interaction => {
         return;
       }
 
-      const lines = embed.description.split('\n');
+      // Our embed description is:
+      // **Product Name**
+      // SKU
+      // Size
+      // Brand
+      // <blank>
+      // Click the button...
+      const descLines = embed.description.split('\n').map(l => l.trim()).filter(Boolean);
 
-      const productName = getValueFromLines(lines, '**Product Name:**');
-      const sku         = getValueFromLines(lines, '**SKU:**');
-      const size        = getValueFromLines(lines, '**Size:**');
-      const brand       = getValueFromLines(lines, '**Brand:**');
+      const productName = descLines[0]?.replace(/\*\*/g, '') || '';
+      const sku         = descLines[1] || '';
+      const size        = descLines[2] || '';
+      const brand       = descLines[3] || '';
 
-      const dealId        = getValueFromLines(lines, '**Order ID:**') || messageId;
+      const dealId = ''; // optional: we don't show Order ID in the embed anymore
       const orderRecordId = await findOrderRecordIdByMessageId(messageId);
 
       const sellerNumberRaw = interaction.fields.getTextInputValue('seller_id').trim();
@@ -547,10 +558,10 @@ client.on(Events.InteractionCreate, async interaction => {
 
       // Optionally also store product metadata on the offer
       if (productName) fields['Product Name'] = productName;
-      if (sku)         fields['SKU']          = sku;
-      if (size)        fields['Size']         = size;
-      if (brand)       fields['Brand']        = brand;
-      if (dealId)      fields['Order ID']     = dealId;
+      if (sku)         fields['SKU'] = sku;
+      if (size)        fields['Size'] = size;
+      if (brand)       fields['Brand'] = brand;
+      if (dealId)      fields['Order ID'] = dealId;
 
       await sellerOffersTable.create(fields);
 
