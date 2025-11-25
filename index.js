@@ -1,6 +1,8 @@
-import dotenv from 'dotenv';
+import 'dotenv/config';
 import express from 'express';
-import bodyParser from 'body-parser';
+import morgan from 'morgan';
+import Airtable from 'airtable';
+import fetch from 'node-fetch'; // kept for potential future use
 import {
   Client,
   GatewayIntentBits,
@@ -9,313 +11,586 @@ import {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  ChannelType,
-  PermissionsBitField,
-  Events,
-  MessageFlags,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+  Events
 } from 'discord.js';
 
-// If you run Node < 18 locally, uncomment next line and install node-fetch
-// import fetch from 'node-fetch';
+/* ---------------- ENV CONFIG ---------------- */
 
-dotenv.config();
+const {
+  DISCORD_TOKEN,
+  DISCORD_DEALS_CHANNEL_ID, // can be comma-separated IDs
+  AIRTABLE_API_KEY,
+  AIRTABLE_BASE_ID,
+  AIRTABLE_INVENTORY_TABLE,        // not used here but kept
+  AIRTABLE_SELLER_OFFERS_TABLE,    // NEW: Seller Offers table
+  AIRTABLE_SELLERS_TABLE,
+  AIRTABLE_ORDERS_TABLE,
+  PORT = 10000
+} = process.env;
 
-// ===== Helpers =====
-function getFirstValue(value) {
-  return Array.isArray(value) ? (value[0] || "").toString().trim() : (value || "").toString().trim();
-}
-function safeSlug(str) {
-  return String(str || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/(^-|-$)/g, '')
-    .slice(0, 90);
-}
-
-// Airtable helpers (status gate)
-const AT_API_KEY     = process.env.AIRTABLE_API_KEY || '';
-const AT_BASE_ID     = process.env.AIRTABLE_BASE_ID || '';
-const AT_TABLE_NAME  = process.env.AIRTABLE_TABLE_NAME || '';
-const AT_STATUS_FIELD = process.env.AIRTABLE_STATUS_FIELD || 'Fulfillment Status';
-const AT_ACTIVE_VALUE = process.env.AIRTABLE_ACTIVE_STATUS_VALUE || 'Outsource';
-
-async function getAirtableStatus(recordId) {
-  if (!AT_API_KEY || !AT_BASE_ID || !AT_TABLE_NAME || !recordId) return null;
-  const url = `https://api.airtable.com/v0/${AT_BASE_ID}/${encodeURIComponent(AT_TABLE_NAME)}/${recordId}`;
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${AT_API_KEY}` } });
-  if (!res.ok) return null;
-  const json = await res.json();
-  return json?.fields?.[AT_STATUS_FIELD] ?? null;
+if (!DISCORD_TOKEN || !DISCORD_DEALS_CHANNEL_ID || !AIRTABLE_API_KEY || !AIRTABLE_BASE_ID) {
+  console.error('❌ Missing required environment variables.');
+  process.exit(1);
 }
 
-// ===== App =====
-const app = express();
-const PORT = process.env.PORT || 3000;
+// Allow multiple deal channels (comma-separated)
+const dealsChannelIds = DISCORD_DEALS_CHANNEL_ID.split(',')
+  .map(id => id.trim())
+  .filter(Boolean);
 
-// Config
-const WTB_INBOX_CHANNEL = process.env.WTB_INBOX_CHANNEL || 'wtb-requests'; // where the button message is posted
-const WTB_PRIVATE_PREFIX = process.env.WTB_PRIVATE_PREFIX || '';           // prefix for new channel names (leave blank per your preference)
-const WTB_STAFF_ROLE_ID = process.env.WTB_STAFF_ROLE_ID || '';            // optional staff role
-const WTB_CATEGORY_ID = process.env.WTB_CATEGORY_ID || '';                // preferred category for new channels
-const WTB_CATEGORY_NAME = process.env.WTB_CATEGORY_NAME || '';            // fallback by name
+if (dealsChannelIds.length === 0) {
+  console.error('❌ No valid DISCORD_DEALS_CHANNEL_ID(s) provided.');
+  process.exit(1);
+}
+
+/* ---------------- Airtable ---------------- */
+
+const base = new Airtable({ apiKey: AIRTABLE_API_KEY }).base(AIRTABLE_BASE_ID);
+
+// Tables
+const sellerOffersTableName = AIRTABLE_SELLER_OFFERS_TABLE || 'Seller Offers';
+const sellersTableName      = AIRTABLE_SELLERS_TABLE       || 'Sellers Database';
+const ordersTableName       = AIRTABLE_ORDERS_TABLE        || 'Unfulfilled Orders Log';
+
+// Order fields used by this bot
+const ORDER_FIELD_SELLER_MSG_IDS   = 'Seller Offer Message ID';
+const ORDER_FIELD_LOWEST_OFFER     = 'Lowest Seller Offer';
+const ORDER_FIELD_FINAL_OUTSOURCE  = 'Final Outsource Buying Price';
+const ORDER_FIELD_BUTTONS_DISABLED = 'Seller Offer Buttons Disabled'; // optional boolean
+
+// Step size for undercutting (change here if you want €5 instead)
+const MIN_UNDERCUT_STEP = 2.5;
+
+/* ---------------- Discord ---------------- */
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.GuildMembers],
-  partials: [Partials.Channel],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages
+  ],
+  partials: [Partials.Channel]
 });
 
-client.once(Events.ClientReady, (c) => console.log(`✅ Logged in as ${c.user.tag}`));
-client.login(process.env.DISCORD_TOKEN);
+client.once(Events.ClientReady, c => {
+  console.log(`🤖 Seller Offers Bot logged in as ${c.user.tag}`);
+});
 
-// -----------------------------
-// Button interactions
-// -----------------------------
-client.on('interactionCreate', async (interaction) => {
-  if (!interaction.isButton()) return;
+client.login(DISCORD_TOKEN);
 
-  const customId = interaction.customId;
+/* ---------------- Helpers ---------------- */
 
-  // customId format: open_wtb|<orderNumber>|<recordId>
-  if (customId.startsWith('open_wtb|')) {
-    const parts = customId.split('|');
-    const orderNumber = (parts[1] || '').trim();
-    const recordId = (parts[2] || '').trim();
+/**
+ * Extract value from description lines like:
+ *  "**SKU:** 1234"
+ * with label = "**SKU:**"
+ */
+function getValueFromLines(lines, label) {
+  const line = lines.find(l => l.startsWith(label));
+  if (!line) return '';
+  return line.split(label)[1].trim();
+}
 
-    try {
-      // 1) Gate on Airtable status
-      let status = null;
-      try { status = await getAirtableStatus(recordId); } catch (_) {}
-      const isActive = !status || status === AT_ACTIVE_VALUE; // if we can't read status, allow by default
+/**
+ * Find order record based on one of its Discord message IDs.
+ * Works even if Seller Offer Message ID stores multiple IDs (comma-separated).
+ */
+async function findOrderRecordIdByMessageId(messageId) {
+  const records = await base(ordersTableName)
+    .select({
+      maxRecords: 1,
+      filterByFormula: `SEARCH("${messageId}", {${ORDER_FIELD_SELLER_MSG_IDS}})`
+    })
+    .firstPage();
 
-      // If closed -> disable the button for everyone and tell the clicker
-      if (!isActive) {
-        const disabledRow = new ActionRowBuilder().addComponents(
-          ...interaction.message.components[0].components.map(btn =>
+  return records[0]?.id || null;
+}
+
+/**
+ * Find Seller record in Sellers Database by Seller Code (e.g. "SE-00385")
+ * Assumes primary / first column in Sellers Database is "Seller ID"
+ */
+async function findSellerRecordIdByCode(sellerCode) {
+  if (!sellerCode) return null;
+
+  const sellersTable = base(sellersTableName);
+
+  const records = await sellersTable
+    .select({
+      maxRecords: 1,
+      filterByFormula: `{Seller ID} = "${sellerCode}"`
+    })
+    .firstPage();
+
+  if (!records || records.length === 0) return null;
+  return records[0].id;
+}
+
+/**
+ * Safely parse a numeric field from Airtable (number or string).
+ */
+function parseNumericField(value) {
+  if (typeof value === 'number') return value;
+  if (typeof value === 'string') {
+    const n = parseFloat(value.replace(',', '.').replace(/[^\d.\-]/g, ''));
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+/**
+ * Build an action row with only the Offer button.
+ */
+function buildOfferOnlyRow(disabled = false) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('partner_offer')
+      .setLabel('Offer')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(disabled)
+  );
+}
+
+/**
+ * Disable all seller-offer messages (in all deal channels) for a given order record ID.
+ * Uses the comma-separated "Seller Offer Message ID" field on Orders.
+ */
+async function disableSellerOfferMessagesForRecord(orderRecordId) {
+  // Load order
+  const orderRecord = await base(ordersTableName).find(orderRecordId);
+  if (!orderRecord) {
+    console.warn(`⚠️ Order record not found for disable: ${orderRecordId}`);
+    return;
+  }
+
+  const messageIdsRaw = orderRecord.get(ORDER_FIELD_SELLER_MSG_IDS);
+  if (!messageIdsRaw) {
+    console.warn(`⚠️ No ${ORDER_FIELD_SELLER_MSG_IDS} stored on order: ${orderRecordId}`);
+    return;
+  }
+
+  const messageIds = String(messageIdsRaw)
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  if (messageIds.length === 0) {
+    console.warn(`⚠️ No valid message IDs parsed for order: ${orderRecordId}`);
+    return;
+  }
+
+  // For each deal channel & each message ID, try to fetch and disable buttons
+  for (const channelId of dealsChannelIds) {
+    const channel = await client.channels.fetch(channelId).catch(() => null);
+    if (!channel || !channel.isTextBased()) continue;
+
+    for (const msgId of messageIds) {
+      const msg = await channel.messages.fetch(msgId).catch(() => null);
+      if (!msg) continue;
+
+      const disabledComponents = msg.components.map(row =>
+        new ActionRowBuilder().addComponents(
+          ...row.components.map(btn =>
             ButtonBuilder.from(btn).setDisabled(true)
           )
-        );
-        await interaction.update({
-          content: `🚫 WTB closed — this item is no longer needed`,
-          components: [disabledRow],
+        )
+      );
+
+      await msg.edit({ components: disabledComponents });
+    }
+  }
+}
+
+/* ---------------- Express HTTP API ---------------- */
+
+const app = express();
+app.use(morgan('combined'));
+app.use(express.json({ limit: '1mb' }));
+
+app.get('/', (_req, res) =>
+  res.type('text/plain').send('Seller Offers Bot OK')
+);
+
+app.get('/health', (_req, res) =>
+  res.json({ ok: true, ts: new Date().toISOString() })
+);
+
+/**
+ * POST /partner-offer-deal
+ * (and /partner-deal if you want to reuse the same payload)
+ *
+ * → Offer-only button (no Claim)
+ */
+async function handleOfferDealPost(req, res) {
+  try {
+    const {
+      productName,
+      sku,
+      size,
+      brand,
+      startPayout,
+      imageUrl,
+      dealId,
+      recordId   // Order record ID (Unfulfilled Orders Log)
+    } = req.body || {};
+
+    if (!productName || !sku || !size || !brand || !startPayout) {
+      return res.status(400).json({ error: 'Missing required fields in payload.' });
+    }
+
+    const descriptionLines = [
+      `**Product Name:** ${productName}`,
+      `**SKU:** ${sku}`,
+      `**Size:** ${size}`,
+      `**Brand:** ${brand}`,
+      `**Payout:** €${Number(startPayout).toFixed(2)}`,
+      dealId ? `**Order ID:** ${dealId}` : null
+    ].filter(Boolean);
+
+    const embed = new EmbedBuilder()
+      .setTitle('🧨 NEW DEAL (OFFER ONLY) 🧨')
+      .setDescription(descriptionLines.join('\n'))
+      .setColor(0xf1c40f);
+
+    if (imageUrl) {
+      embed.setImage(imageUrl);
+    }
+
+    const messageIds = [];
+
+    for (const channelId of dealsChannelIds) {
+      const channel = await client.channels.fetch(channelId).catch(() => null);
+      if (!channel || !channel.isTextBased()) {
+        console.warn(`⚠️ Deals channel ${channelId} not found or not text-based.`);
+        continue;
+      }
+
+      const msg = await channel.send({
+        embeds: [embed],
+        components: [buildOfferOnlyRow(false)]
+      });
+
+      messageIds.push(msg.id);
+    }
+
+    if (messageIds.length === 0) {
+      return res.status(500).json({ error: 'No valid deal channels available.' });
+    }
+
+    // Store message IDs on the ORDER record as "Seller Offer Message ID"
+    if (recordId) {
+      try {
+        const fieldsToUpdate = {
+          [ORDER_FIELD_SELLER_MSG_IDS]: messageIds.join(',')
+        };
+        // Optionally track a flag
+        if (ORDER_FIELD_BUTTONS_DISABLED) {
+          fieldsToUpdate[ORDER_FIELD_BUTTONS_DISABLED] = false;
+        }
+        await base(ordersTableName).update(recordId, fieldsToUpdate);
+      } catch (e) {
+        console.error('Failed to update order record with Seller Offer message IDs / reset flag:', e);
+      }
+    }
+
+    return res.json({ ok: true, messageIds });
+  } catch (err) {
+    console.error('Error in offer-deal POST:', err);
+    return res.status(500).json({ error: 'Internal error.' });
+  }
+}
+
+app.post('/partner-offer-deal', handleOfferDealPost);
+// If you also want /partner-deal to behave the same (offer-only), keep this:
+app.post('/partner-deal', handleOfferDealPost);
+
+/**
+ * POST /seller-offer/disable
+ * Body: { recordId } where recordId = Orders table record ID
+ */
+app.post('/seller-offer/disable', async (req, res) => {
+  try {
+    const { recordId } = req.body || {};
+    if (!recordId) {
+      return res.status(400).json({ error: 'Missing recordId.' });
+    }
+
+    await disableSellerOfferMessagesForRecord(recordId);
+
+    try {
+      const fieldsToUpdate = {};
+      if (ORDER_FIELD_BUTTONS_DISABLED) {
+        fieldsToUpdate[ORDER_FIELD_BUTTONS_DISABLED] = true;
+        await base(ordersTableName).update(recordId, fieldsToUpdate);
+      }
+    } catch (e) {
+      console.error('Failed to set Seller Offer Buttons Disabled = true:', e);
+    }
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('Error in /seller-offer/disable:', err);
+    return res.status(500).json({ error: 'Internal error.' });
+  }
+});
+
+/* ---------------- Discord Interaction Logic ---------------- */
+
+client.on(Events.InteractionCreate, async interaction => {
+  try {
+    /* ---------- BUTTONS ---------- */
+    if (interaction.isButton()) {
+      if (
+        !dealsChannelIds.includes(interaction.channelId) ||
+        interaction.customId !== 'partner_offer'
+      ) {
+        return;
+      }
+
+      const messageId = interaction.message.id;
+      const embed = interaction.message.embeds?.[0];
+
+      if (!embed) {
+        try {
+          await interaction.reply({
+            content: '❌ No deal embed found.',
+            ephemeral: true
+          });
+        } catch (err) {
+          if (err.code === 10062) {
+            console.warn('⚠️ Unknown/expired interaction (no embed), ignoring.');
+          } else {
+            throw err;
+          }
+        }
+        return;
+      }
+
+      // Compute Current Lowest Offer for this order
+      let currentLowestDisplay = 'N/A';
+
+      let orderRecordIdForModal = await findOrderRecordIdByMessageId(messageId);
+      if (orderRecordIdForModal) {
+        try {
+          const orderRec = await base(ordersTableName).find(orderRecordIdForModal);
+          const lowestVal = orderRec.get(ORDER_FIELD_LOWEST_OFFER);
+          const fallbackVal = orderRec.get(ORDER_FIELD_FINAL_OUTSOURCE);
+
+          const lowestNum = parseNumericField(lowestVal);
+          const fallbackNum = parseNumericField(fallbackVal);
+
+          const finalNum = lowestNum != null ? lowestNum : fallbackNum;
+          if (finalNum != null) {
+            currentLowestDisplay = `€${finalNum.toFixed(2)}`;
+          }
+        } catch (e) {
+          console.error('Failed to load order for current lowest offer:', e);
+        }
+      }
+
+      // Build Offer modal
+      const modal = new ModalBuilder()
+        .setCustomId(`partner_offer_modal:${messageId}`)
+        .setTitle('Enter Seller ID & Offer');
+
+      const sellerIdInput = new TextInputBuilder()
+        .setCustomId('seller_id')
+        .setLabel('Seller ID (e.g. 00001)')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setPlaceholder('00001');
+
+      const currentLowestInput = new TextInputBuilder()
+        .setCustomId('current_lowest_info')
+        .setLabel('Current Lowest Offer (reference)')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false)
+        .setValue(currentLowestDisplay);
+
+      const offerInput = new TextInputBuilder()
+        .setCustomId('offer_price')
+        .setLabel('Your Offer (€)')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setPlaceholder('140');
+
+      const row1 = new ActionRowBuilder().addComponents(sellerIdInput);
+      const row2 = new ActionRowBuilder().addComponents(currentLowestInput);
+      const row3 = new ActionRowBuilder().addComponents(offerInput);
+
+      modal.addComponents(row1, row2, row3);
+
+      await interaction.showModal(modal);
+      return;
+    }
+
+    /* ---------- MODALS ---------- */
+    if (interaction.isModalSubmit()) {
+      if (
+        !dealsChannelIds.includes(interaction.channelId) ||
+        !interaction.customId.startsWith('partner_')
+      ) {
+        return;
+      }
+
+      const [prefix, messageId] = interaction.customId.split(':');
+
+      if (prefix !== 'partner_offer_modal') {
+        return; // only offer flow exists in this bot
+      }
+
+      const channel = interaction.channel;
+      if (!channel || !channel.isTextBased()) {
+        await interaction.reply({
+          content: '❌ Could not find the original deal message.',
+          ephemeral: true
         });
         return;
       }
 
-      // 2) Active -> create/reuse the private channel and DO NOT disable the button
-      const guild = await client.guilds.fetch(process.env.DISCORD_GUILD_ID);
-      const channels = await guild.channels.fetch();
+      const msg = await channel.messages.fetch(messageId).catch(() => null);
+      const embed = msg?.embeds?.[0];
 
-      // Find target parent category (ID first, then name, else fall back to inbox parent)
-      let parentId = null;
-      if (WTB_CATEGORY_ID) parentId = WTB_CATEGORY_ID;
-      else if (WTB_CATEGORY_NAME) {
-        const cat = channels.find(c => c?.type === ChannelType.GuildCategory && c?.name === WTB_CATEGORY_NAME);
-        if (cat) parentId = cat.id;
-      }
-      if (!parentId) {
-        const inbox = channels.find(c => c?.name === WTB_INBOX_CHANNEL);
-        parentId = inbox?.parentId ?? null;
+      if (!embed || !embed.description) {
+        await interaction.reply({ content: '❌ Missing deal details.', ephemeral: true });
+        return;
       }
 
-      // Username in the new channel name (works without fetching members if intent is disabled)
-      const displayName = interaction.member?.nickname || interaction.user.username;
+      const lines = embed.description.split('\n');
 
-      // Build new channel name: <orderNumber>-<username> (prefix optional)
-      const baseName = safeSlug(`${orderNumber}-${displayName}`);
-      const channelName = WTB_PRIVATE_PREFIX ? safeSlug(`${WTB_PRIVATE_PREFIX}-${baseName}`) : baseName;
+      const productName = getValueFromLines(lines, '**Product Name:**');
+      const sku = getValueFromLines(lines, '**SKU:**');
+      const size = getValueFromLines(lines, '**Size:**');
+      const brand = getValueFromLines(lines, '**Brand:**');
+      const startPayout = parseFloat(
+        getValueFromLines(lines, '**Payout:**')
+          ?.replace('€', '')
+          ?.replace(',', '.') || '0'
+      );
 
-      // Reuse existing channel if name collision
-      let target = channels.find(c => c?.type === ChannelType.GuildText && c?.name === channelName);
+      const dealId = getValueFromLines(lines, '**Order ID:**') || messageId;
+      const orderRecordId = await findOrderRecordIdByMessageId(messageId);
 
-      // Permission overwrites for private channel
-      const overwrites = [
-        { id: guild.roles.everyone, deny: [PermissionsBitField.Flags.ViewChannel] },
-        {
-          id: interaction.user.id,
-          allow: [
-            PermissionsBitField.Flags.ViewChannel,
-            PermissionsBitField.Flags.SendMessages,
-            PermissionsBitField.Flags.ReadMessageHistory,
-          ],
-        },
-        {
-          id: client.user.id,
-          allow: [
-            PermissionsBitField.Flags.ViewChannel,
-            PermissionsBitField.Flags.SendMessages,
-            PermissionsBitField.Flags.ReadMessageHistory,
-            PermissionsBitField.Flags.ManageChannels,
-          ],
-        },
-      ];
-      if (WTB_STAFF_ROLE_ID) {
-        overwrites.push({
-          id: WTB_STAFF_ROLE_ID,
-          allow: [
-            PermissionsBitField.Flags.ViewChannel,
-            PermissionsBitField.Flags.SendMessages,
-            PermissionsBitField.Flags.ReadMessageHistory,
-          ],
+      const sellerNumberRaw = interaction.fields.getTextInputValue('seller_id').trim();
+
+      if (!/^\d+$/.test(sellerNumberRaw)) {
+        await interaction.reply({
+          content: '❌ Seller Number must contain digits only (no SE-, just the digits). Please try again.',
+          ephemeral: true
         });
+        return;
       }
 
-      if (!target) {
-        target = await guild.channels.create({
-          name: channelName,
-          type: ChannelType.GuildText,
-          parent: parentId || undefined,
-          permissionOverwrites: overwrites,
-          reason: `WTB channel opened by ${interaction.user.tag} for order ${orderNumber}`,
+      const rawOffer = interaction.fields.getTextInputValue('offer_price').trim();
+      const offerPrice = parseFloat(rawOffer.replace(',', '.') || '0');
+      if (!Number.isFinite(offerPrice) || offerPrice <= 0) {
+        await interaction.reply({
+          content: '❌ Please enter a valid positive offer amount.',
+          ephemeral: true
         });
-
-        // Pull product + size from the original embed description (ignore CTA line)
-        const emb = interaction.message.embeds?.[0];
-       let productName = '';
-       let sizeText = '';
-
-       if (emb?.description) {
-         // Split into lines, trim, drop empties
-         const rawLines = emb.description.split('\n').map(s => s.trim()).filter(Boolean);
-         // Remove the CTA line we appended (“Click the button below…”)
-         const lines = rawLines.filter(l => !/click the button/i.test(l));
-
-         // Our content lines are:
-         // 0: **Product Name**
-         // 1: SKU
-         // 2: (optional) SKU Soft (if different)
-         // 3: Size
-         // 4: Brand (last)
-         productName = (lines[0] || '').replace(/\*\*/g, '');
-
-         // Take the second-to-last as Size (since last is Brand)
-         if (lines.length >= 4) {
-           sizeText = lines[lines.length - 2];
-         } else if (lines.length >= 3) {
-           // If brand is missing for some reason, size will be the 3rd item
-           sizeText = lines[2];
-         }
-       }
-
-       const welcomeMsg =
-         `👋 Welcome <@${interaction.user.id}>! Please share your offer for **${productName}${sizeText ? ` - ${sizeText}` : ''}** below; a staff member will be with you shortly.`;
-
-       await target.send(welcomeMsg);
-
-      } else {
-        // Ensure the clicker has access if channel existed
-        await target.permissionOverwrites.edit(interaction.user.id, {
-          ViewChannel: true,
-          SendMessages: true,
-          ReadMessageHistory: true,
-        });
+        return;
       }
 
-      // IMPORTANT: keep the button clickable → send an EPHEMERAL reply instead of updating the message
+      // 🔐 SAFETY: enforce "must be at least MIN_UNDERCUT_STEP lower than Current Lowest Offer"
+      let referenceLow = null;
+      if (orderRecordId) {
+        try {
+          const orderRec = await base(ordersTableName).find(orderRecordId);
+          const lowestVal = orderRec.get(ORDER_FIELD_LOWEST_OFFER);
+          const fallbackVal = orderRec.get(ORDER_FIELD_FINAL_OUTSOURCE);
+
+          const lowestNum = parseNumericField(lowestVal);
+          const fallbackNum = parseNumericField(fallbackVal);
+
+          referenceLow = lowestNum != null ? lowestNum : fallbackNum;
+        } catch (e) {
+          console.error('Failed to load order for undercut check:', e);
+        }
+      }
+
+      if (referenceLow != null) {
+        const maxAllowed = referenceLow - MIN_UNDERCUT_STEP;
+        if (!(offerPrice <= maxAllowed + 1e-9)) {
+          const refStr = `€${referenceLow.toFixed(2)}`;
+          const maxStr = `€${maxAllowed.toFixed(2)}`;
+          await interaction.reply({
+            content:
+              `❌ Your offer is too high.\n` +
+              `Current Lowest Offer: **${refStr}**.\n` +
+              `Your offer must be at least **€${MIN_UNDERCUT_STEP.toFixed(2)}** lower (≤ **${maxStr}**).`,
+            ephemeral: true
+          });
+          return;
+        }
+      }
+
+      const sellerCode = `SE-${sellerNumberRaw}`;
+      const sellerRecordId = await findSellerRecordIdByCode(sellerCode);
+      if (!sellerRecordId) {
+        await interaction.reply({
+          content: `❌ Could not find a seller with ID \`${sellerCode}\` in Sellers Database.`,
+          ephemeral: true
+        });
+        return;
+      }
+
+      // Create record in Seller Offers table
+      const sellerOffersTable = base(sellerOffersTableName);
+
+      const fields = {
+        'Partner Offer': offerPrice, // or rename to 'Seller Offer' if you change the field name
+        'Offer Date': new Date().toISOString().split('T')[0],
+        'Seller ID': [sellerRecordId]
+      };
+
+      if (orderRecordId) {
+        fields['Linked Orders'] = [orderRecordId];
+      }
+
+      // Optionally also store product metadata on the offer
+      if (productName) fields['Product Name'] = productName;
+      if (sku)         fields['SKU'] = sku;
+      if (size)        fields['Size'] = size;
+      if (brand)       fields['Brand'] = brand;
+      if (dealId)      fields['Order ID'] = dealId;
+
+      await sellerOffersTable.create(fields);
+
       await interaction.reply({
-        content: `✅ Opened WTB channel: <#${target.id}>`,
-        flags: MessageFlags.Ephemeral,
+        content:
+          `✅ Offer submitted for **${productName} (${size})**.\n` +
+          `Seller: \`${sellerCode}\`\n` +
+          `Offer: €${offerPrice.toFixed(2)}`,
+        ephemeral: true
       });
-
-    } catch (err) {
-      console.error('❌ Failed to open WTB channel:', err);
-      if (interaction.deferred || interaction.replied) {
-        await interaction.editReply({ content: '❌ Could not open WTB channel.' });
-      } else {
-        await interaction.reply({ content: '❌ Could not open WTB channel.', flags: MessageFlags.Ephemeral });
+      return;
+    }
+  } catch (err) {
+    console.error('Interaction error:', err);
+    if (interaction.isRepliable()) {
+      try {
+        if (interaction.replied || interaction.deferred) {
+          await interaction.followUp({
+            content: '❌ Something went wrong handling this interaction.',
+            ephemeral: true
+          });
+        } else {
+          await interaction.reply({
+            content: '❌ Something went wrong handling this interaction.',
+            ephemeral: true
+          });
+        }
+      } catch (_) {
+        // ignore
       }
     }
   }
 });
 
-app.use(bodyParser.json());
+/* ---------------- Start HTTP server ---------------- */
 
-// -----------------------------
-// Webhook endpoint
-// -----------------------------
-app.post('/', async (req, res) => {
-  // Optional protection: shared secret
-  if (process.env.WEBHOOK_SECRET) {
-    const auth = req.get('authorization') || '';
-    if (auth !== `Bearer ${process.env.WEBHOOK_SECRET}`) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-  }
-
-  const {
-    trigger_type,
-    order_number,     // used ONLY for naming the channel
-    product_name,
-    sku,
-    sku_soft,
-    size,
-    brand,
-    picture_url,
-    image_url,
-    record_id         // ← include this so the button can check Airtable
-  } = req.body;
-
-  if (trigger_type !== 'send-wtb-webhook') {
-    return res.status(400).json({ error: 'Unsupported trigger_type' });
-  }
-
-  try {
-    const guild = await client.guilds.fetch(process.env.DISCORD_GUILD_ID);
-    const channels = await guild.channels.fetch();
-
-    // Find the inbox channel (by name anywhere in the guild)
-    const inbox = channels.find(c => c?.name === WTB_INBOX_CHANNEL);
-    if (!inbox) {
-      console.error('❌ Inbox channel not found.');
-      return res.status(404).json({ error: 'WTB inbox channel not found' });
-    }
-
-    // Clean values for the embed
-    const name = getFirstValue(product_name);
-    const brandName = getFirstValue(brand);
-    const sizeStr = getFirstValue(size);
-    const skuMain = getFirstValue(sku);
-    const skuSoftVal = getFirstValue(sku_soft);
-
-    // Build minimal, stacked lines like your screenshot
-    const lines = [
-      name ? `**${name}**` : null,
-      skuMain || null,
-      (skuSoftVal && skuSoftVal !== skuMain) ? skuSoftVal : null,
-      sizeStr || null,
-      brandName || null,
-    ].filter(Boolean).join('\n');
-
-    const embed = new EmbedBuilder()
-      .setTitle('🚨 NEW DEAL 🚨')
-      .setColor('#f1c40f') // yellow accent bar
-      .setDescription(`${lines}\n\nClick the button below to open a ticket and share your offer.`);
-
-    // Add product image if provided (prefers picture_url, falls back to image_url)
-    const rawPic = getFirstValue(picture_url || image_url);
-    if (rawPic && /^https?:\/\//i.test(rawPic)) {
-      embed.setImage(rawPic); // big image under the embed
-    }
-
-    // Button carries order number and record id (for Airtable status check)
-    const orderForButton = getFirstValue(order_number) || String(Date.now());
-    const recordForButton = getFirstValue(record_id) || '';
-    const customId = `open_wtb|${orderForButton}|${recordForButton}`;
-
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId(customId)
-        .setLabel('Open WTB Ticket')
-        .setStyle(ButtonStyle.Success)
-    );
-
-    await inbox.send({ embeds: [embed], components: [row] });
-
-    return res.json({ ok: true, routed_to: 'send-wtb-webhook' });
-  } catch (err) {
-    console.error('❌ Error in send-wtb-webhook:', err);
-    return res.status(500).json({ ok: false, error: err.message });
-  }
+app.listen(PORT, () => {
+  console.log(`🌐 Seller Offers Bot HTTP server running on port ${PORT}`);
 });
-
-app.get('/', (_, res) => res.send('OK'));
-app.listen(PORT, () => console.log(`🚀 WTB bot server listening on :${PORT}`));
