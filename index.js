@@ -399,14 +399,10 @@ client.on(Events.InteractionCreate, async interaction => {
         }
       }
 
-      // Build Offer modal (Current Lowest in title so it can't be edited)
-      const modalTitle = currentLowestDisplay
-        ? `Lowest: ${currentLowestDisplay} — Enter Seller ID & Offer`
-        : 'Enter Seller ID & Offer';
-
+      // Build Offer modal
       const modal = new ModalBuilder()
         .setCustomId(`partner_offer_modal:${messageId}`)
-        .setTitle(modalTitle);
+        .setTitle('Enter Seller ID & Offer');
 
       const sellerIdInput = new TextInputBuilder()
         .setCustomId('seller_id')
@@ -415,12 +411,22 @@ client.on(Events.InteractionCreate, async interaction => {
         .setRequired(true)
         .setPlaceholder('00001');
 
+      // Use the current lowest as helper text in the placeholder
+      // Use the current lowest as helper text in the placeholder
+      let offerPlaceholder;
+      if (currentLowestDisplay) {
+        offerPlaceholder = `Current lowest offer: ${currentLowestDisplay}`;
+      } else {
+        offerPlaceholder = 'Enter your offer (e.g. 140)';
+      }
+
+
       const offerInput = new TextInputBuilder()
         .setCustomId('offer_price')
         .setLabel('Your Offer (€)')
         .setStyle(TextInputStyle.Short)
         .setRequired(true)
-        .setPlaceholder('140');
+        .setPlaceholder(offerPlaceholder);
 
       const row1 = new ActionRowBuilder().addComponents(sellerIdInput);
       const row2 = new ActionRowBuilder().addComponents(offerInput);
@@ -429,7 +435,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
       await interaction.showModal(modal);
       return;
-    }
+      }
 
     /* ---------- MODALS ---------- */
     if (interaction.isModalSubmit()) {
@@ -555,13 +561,6 @@ client.on(Events.InteractionCreate, async interaction => {
       if (orderRecordId) {
         fields['Linked Orders'] = [orderRecordId];
       }
-
-      // Optionally also store product metadata on the offer
-      if (productName) fields['Product Name'] = productName;
-      if (sku)         fields['SKU'] = sku;
-      if (size)        fields['Size'] = size;
-      if (brand)       fields['Brand'] = brand;
-      if (dealId)      fields['Order ID'] = dealId;
 
       await sellerOffersTable.create(fields);
 
