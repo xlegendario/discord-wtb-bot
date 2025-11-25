@@ -1,8 +1,10 @@
+// seller-offers-bot/server.js
+
 import 'dotenv/config';
 import express from 'express';
 import morgan from 'morgan';
 import Airtable from 'airtable';
-import fetch from 'node-fetch'; // kept for potential future use
+import fetch from 'node-fetch'; // currently unused, kept for future use
 import {
   Client,
   GatewayIntentBits,
@@ -25,7 +27,7 @@ const {
   AIRTABLE_API_KEY,
   AIRTABLE_BASE_ID,
   AIRTABLE_INVENTORY_TABLE,        // not used here but kept
-  AIRTABLE_SELLER_OFFERS_TABLE,    // NEW: Seller Offers table
+  AIRTABLE_SELLER_OFFERS_TABLE,    // Seller Offers table
   AIRTABLE_SELLERS_TABLE,
   AIRTABLE_ORDERS_TABLE,
   PORT = 10000
@@ -221,7 +223,7 @@ app.get('/health', (_req, res) =>
  * POST /partner-offer-deal
  * (and /partner-deal if you want to reuse the same payload)
  *
- * → Offer-only button (no Claim)
+ * → Offer-only button (no Claim, no public payout)
  */
 async function handleOfferDealPost(req, res) {
   try {
@@ -230,13 +232,13 @@ async function handleOfferDealPost(req, res) {
       sku,
       size,
       brand,
-      startPayout,
+      // startPayout,  // no longer required/used
       imageUrl,
       dealId,
       recordId   // Order record ID (Unfulfilled Orders Log)
     } = req.body || {};
 
-    if (!productName || !sku || !size || !brand || !startPayout) {
+    if (!productName || !sku || !size || !brand) {
       return res.status(400).json({ error: 'Missing required fields in payload.' });
     }
 
@@ -245,7 +247,6 @@ async function handleOfferDealPost(req, res) {
       `**SKU:** ${sku}`,
       `**Size:** ${size}`,
       `**Brand:** ${brand}`,
-      `**Payout:** €${Number(startPayout).toFixed(2)}`,
       dealId ? `**Order ID:** ${dealId}` : null
     ].filter(Boolean);
 
@@ -461,16 +462,11 @@ client.on(Events.InteractionCreate, async interaction => {
       const lines = embed.description.split('\n');
 
       const productName = getValueFromLines(lines, '**Product Name:**');
-      const sku = getValueFromLines(lines, '**SKU:**');
-      const size = getValueFromLines(lines, '**Size:**');
-      const brand = getValueFromLines(lines, '**Brand:**');
-      const startPayout = parseFloat(
-        getValueFromLines(lines, '**Payout:**')
-          ?.replace('€', '')
-          ?.replace(',', '.') || '0'
-      );
+      const sku         = getValueFromLines(lines, '**SKU:**');
+      const size        = getValueFromLines(lines, '**Size:**');
+      const brand       = getValueFromLines(lines, '**Brand:**');
 
-      const dealId = getValueFromLines(lines, '**Order ID:**') || messageId;
+      const dealId        = getValueFromLines(lines, '**Order ID:**') || messageId;
       const orderRecordId = await findOrderRecordIdByMessageId(messageId);
 
       const sellerNumberRaw = interaction.fields.getTextInputValue('seller_id').trim();
@@ -540,7 +536,7 @@ client.on(Events.InteractionCreate, async interaction => {
       const sellerOffersTable = base(sellerOffersTableName);
 
       const fields = {
-        'Seller Offer': offerPrice, // or rename to 'Seller Offer' if you change the field name
+        'Seller Offer': offerPrice,
         'Offer Date': new Date().toISOString().split('T')[0],
         'Seller ID': [sellerRecordId]
       };
@@ -551,10 +547,10 @@ client.on(Events.InteractionCreate, async interaction => {
 
       // Optionally also store product metadata on the offer
       if (productName) fields['Product Name'] = productName;
-      if (sku)         fields['SKU'] = sku;
-      if (size)        fields['Size'] = size;
-      if (brand)       fields['Brand'] = brand;
-      if (dealId)      fields['Order ID'] = dealId;
+      if (sku)         fields['SKU']          = sku;
+      if (size)        fields['Size']         = size;
+      if (brand)       fields['Brand']        = brand;
+      if (dealId)      fields['Order ID']     = dealId;
 
       await sellerOffersTable.create(fields);
 
