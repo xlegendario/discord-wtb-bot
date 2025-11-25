@@ -57,7 +57,6 @@ const ordersTableName       = AIRTABLE_ORDERS_TABLE        || 'Unfulfilled Order
 
 // Order fields used by this bot
 const ORDER_FIELD_SELLER_MSG_IDS   = 'Seller Offer Message ID';
-const ORDER_FIELD_LOWEST_OFFER     = 'Lowest Seller Offer';
 const ORDER_FIELD_FINAL_OUTSOURCE  = 'Final Outsource Buying Price';
 const ORDER_FIELD_BUTTONS_DISABLED = 'Seller Offer Buttons Disabled'; // optional boolean
 
@@ -83,53 +82,6 @@ client.login(DISCORD_TOKEN);
 /* ---------------- Helpers ---------------- */
 
 /**
- * Extract value from description lines like:
- *  "**SKU:** 1234"
- * with label = "**SKU:**"
- * (currently only used to parse product data from embed)
- */
-function getValueFromLines(lines, label) {
-  const line = lines.find(l => l.startsWith(label));
-  if (!line) return '';
-  return line.split(label)[1].trim();
-}
-
-/**
- * Find order record based on one of its Discord message IDs.
- * Works even if Seller Offer Message ID stores multiple IDs (comma-separated).
- */
-async function findOrderRecordIdByMessageId(messageId) {
-  const records = await base(ordersTableName)
-    .select({
-      maxRecords: 1,
-      filterByFormula: `SEARCH("${messageId}", {${ORDER_FIELD_SELLER_MSG_IDS}})`
-    })
-    .firstPage();
-
-  return records[0]?.id || null;
-}
-
-/**
- * Find Seller record in Sellers Database by Seller Code (e.g. "SE-00385")
- * Assumes primary / first column in Sellers Database is "Seller ID"
- */
-async function findSellerRecordIdByCode(sellerCode) {
-  if (!sellerCode) return null;
-
-  const sellersTable = base(sellersTableName);
-
-  const records = await sellersTable
-    .select({
-      maxRecords: 1,
-      filterByFormula: `{Seller ID} = "${sellerCode}"`
-    })
-    .firstPage();
-
-  if (!records || records.length === 0) return null;
-  return records[0].id;
-}
-
-/**
  * Safely parse a numeric field from Airtable (number or string).
  */
 function parseNumericField(value) {
@@ -139,6 +91,37 @@ function parseNumericField(value) {
     return Number.isFinite(n) ? n : null;
   }
   return null;
+}
+
+/**
+ * Normalize VAT type string from user input.
+ * Returns one of "Margin", "VAT0", "VAT21" or null if invalid.
+ */
+function normalizeVatType(raw) {
+  if (!raw) return null;
+  const v = raw.trim(); // no toUpperCase, keep exact
+
+  // Only EXACTLY these 3 are allowed:
+  if (v === 'Margin') return 'Margin';
+  if (v === 'VAT0')   return 'VAT0';
+  if (v === 'VAT21')  return 'VAT21';
+
+  return null; // everything else is invalid
+}
+
+
+/**
+ * Compute normalized offer based on VAT type.
+ * - Margin / VAT21 → use as-is
+ * - VAT0 → multiply by 1.21 to compare fairly
+ */
+function getNormalizedOffer(price, vatType) {
+  if (typeof price !== 'number' || !Number.isFinite(price)) return null;
+  if (vatType === 'VAT0') {
+    return price * 1.21;
+  }
+  // Margin or VAT21 (or anything else) treated as "gross" already
+  return price;
 }
 
 /**
@@ -202,6 +185,61 @@ async function disableSellerOfferMessagesForRecord(orderRecordId) {
       await msg.edit({ components: disabledComponents });
     }
   }
+}
+
+/**
+ * Get the current lowest normalized offer for a given order.
+ * Looks at Seller Offers linked to that order and returns:
+ *   { normalized, raw, vatType }
+ * or null if no offers exist.
+ *
+ * If no offers exist, falls back to Final Outsource Buying Price on the order
+ * (treated as Margin with normalized = raw).
+ */
+async function getCurrentLowestForOrder(orderRecordId) {
+  if (!orderRecordId) return null;
+
+  const sellerOffersTable = base(sellerOffersTableName);
+
+  // Find all Seller Offers linked to this order
+  const offers = await sellerOffersTable.select({
+    filterByFormula: `FIND("${orderRecordId}", ARRAYJOIN({Linked Orders}))`
+  }).firstPage();
+
+  let best = null;
+
+  for (const rec of offers) {
+    const price = parseNumericField(rec.get('Seller Offer'));
+    const vatTypeRaw = rec.get('Offer VAT Type');
+    const vatTypeNorm = normalizeVatType(vatTypeRaw || '');
+    const normalized = getNormalizedOffer(price, vatTypeNorm);
+
+    if (!Number.isFinite(normalized)) continue;
+
+    if (!best || normalized < best.normalized) {
+      best = {
+        normalized,
+        raw: price,
+        vatType: vatTypeNorm || null
+      };
+    }
+  }
+
+  // If we found at least one offer, return it
+  if (best) return best;
+
+  // Fallback: use Final Outsource Buying Price from the order
+  const orderRec = await base(ordersTableName).find(orderRecordId).catch(() => null);
+  if (!orderRec) return null;
+
+  const fallbackVal = parseNumericField(orderRec.get(ORDER_FIELD_FINAL_OUTSOURCE));
+  if (!Number.isFinite(fallbackVal)) return null;
+
+  return {
+    normalized: fallbackVal,
+    raw: fallbackVal,
+    vatType: 'Margin' // or 'N/A', whatever you prefer
+  };
 }
 
 /* ---------------- Express HTTP API ---------------- */
@@ -377,32 +415,30 @@ client.on(Events.InteractionCreate, async interaction => {
         return;
       }
 
-      // Compute Current Lowest Offer for this order (for display in modal title)
-      let currentLowestDisplay = null;
+      // Try to find the order linked to this message
+      let orderRecordIdForModal = null;
+      try {
+        const records = await base(ordersTableName)
+          .select({
+            maxRecords: 1,
+            filterByFormula: `SEARCH("${messageId}", {${ORDER_FIELD_SELLER_MSG_IDS}})`
+          })
+          .firstPage();
+        orderRecordIdForModal = records[0]?.id || null;
+      } catch (e) {
+        console.error('Failed to find order by Seller Offer Message ID:', e);
+      }
 
-      let orderRecordIdForModal = await findOrderRecordIdByMessageId(messageId);
+      // Compute current lowest normalized offer (and its raw + VAT type)
+      let lowestInfo = null;
       if (orderRecordIdForModal) {
-        try {
-          const orderRec = await base(ordersTableName).find(orderRecordIdForModal);
-          const lowestVal = orderRec.get(ORDER_FIELD_LOWEST_OFFER);
-          const fallbackVal = orderRec.get(ORDER_FIELD_FINAL_OUTSOURCE);
-
-          const lowestNum = parseNumericField(lowestVal);
-          const fallbackNum = parseNumericField(fallbackVal);
-
-          const finalNum = lowestNum != null ? lowestNum : fallbackNum;
-          if (finalNum != null) {
-            currentLowestDisplay = `€${finalNum.toFixed(2)}`;
-          }
-        } catch (e) {
-          console.error('Failed to load order for current lowest offer:', e);
-        }
+        lowestInfo = await getCurrentLowestForOrder(orderRecordIdForModal);
       }
 
       // Build Offer modal
       const modal = new ModalBuilder()
         .setCustomId(`partner_offer_modal:${messageId}`)
-        .setTitle('Enter Seller ID & Offer');
+        .setTitle('Enter Seller ID, VAT Type & Offer');
 
       const sellerIdInput = new TextInputBuilder()
         .setCustomId('seller_id')
@@ -411,15 +447,21 @@ client.on(Events.InteractionCreate, async interaction => {
         .setRequired(true)
         .setPlaceholder('00001');
 
-      // Use the current lowest as helper text in the placeholder
-      // Use the current lowest as helper text in the placeholder
+      const vatTypeInput = new TextInputBuilder()
+        .setCustomId('vat_type')
+        .setLabel('VAT Type (Margin / VAT0 / VAT21)')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setPlaceholder('Margin / VAT0 / VAT21');
+
+
       let offerPlaceholder;
-      if (currentLowestDisplay) {
-        offerPlaceholder = `Current lowest offer: ${currentLowestDisplay}`;
+      if (lowestInfo && typeof lowestInfo.raw === 'number') {
+        const vatLabel = lowestInfo.vatType || 'N/A';
+        offerPlaceholder = `Current lowest offer: €${lowestInfo.raw.toFixed(2)} (${vatLabel})`;
       } else {
         offerPlaceholder = 'Enter your offer (e.g. 140)';
       }
-
 
       const offerInput = new TextInputBuilder()
         .setCustomId('offer_price')
@@ -429,13 +471,14 @@ client.on(Events.InteractionCreate, async interaction => {
         .setPlaceholder(offerPlaceholder);
 
       const row1 = new ActionRowBuilder().addComponents(sellerIdInput);
-      const row2 = new ActionRowBuilder().addComponents(offerInput);
+      const row2 = new ActionRowBuilder().addComponents(vatTypeInput);
+      const row3 = new ActionRowBuilder().addComponents(offerInput);
 
-      modal.addComponents(row1, row2);
+      modal.addComponents(row1, row2, row3);
 
       await interaction.showModal(modal);
       return;
-      }
+    }
 
     /* ---------- MODALS ---------- */
     if (interaction.isModalSubmit()) {
@@ -478,19 +521,40 @@ client.on(Events.InteractionCreate, async interaction => {
       // Click the button...
       const descLines = embed.description.split('\n').map(l => l.trim()).filter(Boolean);
 
-      const productName = descLines[0]?.replace(/\*\*/g, '') || '';
+      const productName = (descLines[0] || '').replace(/\*\*/g, '') || '';
       const sku         = descLines[1] || '';
       const size        = descLines[2] || '';
       const brand       = descLines[3] || '';
 
-      const dealId = ''; // optional: we don't show Order ID in the embed anymore
-      const orderRecordId = await findOrderRecordIdByMessageId(messageId);
+      // Find order by Seller Offer Message ID
+      let orderRecordId = null;
+      try {
+        const records = await base(ordersTableName)
+          .select({
+            maxRecords: 1,
+            filterByFormula: `SEARCH("${messageId}", {${ORDER_FIELD_SELLER_MSG_IDS}})`
+          })
+          .firstPage();
+        orderRecordId = records[0]?.id || null;
+      } catch (e) {
+        console.error('Failed to find order by Seller Offer Message ID (modal submit):', e);
+      }
 
       const sellerNumberRaw = interaction.fields.getTextInputValue('seller_id').trim();
 
       if (!/^\d+$/.test(sellerNumberRaw)) {
         await interaction.reply({
           content: '❌ Seller Number must contain digits only (no SE-, just the digits). Please try again.',
+          ephemeral: true
+        });
+        return;
+      }
+
+      const vatTypeRaw = interaction.fields.getTextInputValue('vat_type').trim();
+      const vatType = normalizeVatType(vatTypeRaw);
+      if (!vatType) {
+        await interaction.reply({
+          content: '❌ Invalid VAT Type. Please use one of: Margin, VAT0, VAT21.',
           ephemeral: true
         });
         return;
@@ -506,33 +570,34 @@ client.on(Events.InteractionCreate, async interaction => {
         return;
       }
 
+      const normalizedOffer = getNormalizedOffer(offerPrice, vatType);
+      if (!Number.isFinite(normalizedOffer)) {
+        await interaction.reply({
+          content: '❌ Could not compute a valid normalized price for this VAT type.',
+          ephemeral: true
+        });
+        return;
+      }
+
       // 🔐 SAFETY: enforce "must be at least MIN_UNDERCUT_STEP lower than Current Lowest Offer"
       let referenceLow = null;
       if (orderRecordId) {
-        try {
-          const orderRec = await base(ordersTableName).find(orderRecordId);
-          const lowestVal = orderRec.get(ORDER_FIELD_LOWEST_OFFER);
-          const fallbackVal = orderRec.get(ORDER_FIELD_FINAL_OUTSOURCE);
-
-          const lowestNum = parseNumericField(lowestVal);
-          const fallbackNum = parseNumericField(fallbackVal);
-
-          referenceLow = lowestNum != null ? lowestNum : fallbackNum;
-        } catch (e) {
-          console.error('Failed to load order for undercut check:', e);
+        const lowestInfo = await getCurrentLowestForOrder(orderRecordId);
+        if (lowestInfo && typeof lowestInfo.normalized === 'number') {
+          referenceLow = lowestInfo.normalized;
         }
       }
 
       if (referenceLow != null) {
         const maxAllowed = referenceLow - MIN_UNDERCUT_STEP;
-        if (!(offerPrice <= maxAllowed + 1e-9)) {
+        if (!(normalizedOffer <= maxAllowed + 1e-9)) {
           const refStr = `€${referenceLow.toFixed(2)}`;
           const maxStr = `€${maxAllowed.toFixed(2)}`;
           await interaction.reply({
             content:
               `❌ Your offer is too high.\n` +
-              `Current Lowest Offer: **${refStr}**.\n` +
-              `Your offer must be at least **€${MIN_UNDERCUT_STEP.toFixed(2)}** lower (≤ **${maxStr}**).`,
+              `Current lowest normalized offer (incl. VAT logic): **${refStr}**.\n` +
+              `Your offer must be at least **€${MIN_UNDERCUT_STEP.toFixed(2)}** lower on that basis (≤ **${maxStr}**).`,
             ephemeral: true
           });
           return;
@@ -540,7 +605,21 @@ client.on(Events.InteractionCreate, async interaction => {
       }
 
       const sellerCode = `SE-${sellerNumberRaw}`;
-      const sellerRecordId = await findSellerRecordIdByCode(sellerCode);
+      // If you want to still validate seller exists:
+      const sellersTable = base(sellersTableName);
+      let sellerRecordId = null;
+      try {
+        const records = await sellersTable
+          .select({
+            maxRecords: 1,
+            filterByFormula: `{Seller ID} = "${sellerCode}"`
+          })
+          .firstPage();
+        sellerRecordId = records[0]?.id || null;
+      } catch (e) {
+        console.error('Error looking up seller record:', e);
+      }
+
       if (!sellerRecordId) {
         await interaction.reply({
           content: `❌ Could not find a seller with ID \`${sellerCode}\` in Sellers Database.`,
@@ -554,6 +633,8 @@ client.on(Events.InteractionCreate, async interaction => {
 
       const fields = {
         'Seller Offer': offerPrice,
+        'Offer VAT Type': vatType,
+        'Offer Cost (Normalized)': normalizedOffer,
         'Offer Date': new Date().toISOString().split('T')[0],
         'Seller ID': [sellerRecordId]
       };
@@ -562,13 +643,19 @@ client.on(Events.InteractionCreate, async interaction => {
         fields['Linked Orders'] = [orderRecordId];
       }
 
+      // Optionally also store product metadata on the offer
+      if (productName) fields['Product Name'] = productName;
+      if (sku)         fields['SKU']         = sku;
+      if (size)        fields['Size']        = size;
+      if (brand)       fields['Brand']       = brand;
+
       await sellerOffersTable.create(fields);
 
       await interaction.reply({
         content:
           `✅ Offer submitted for **${productName} (${size})**.\n` +
           `Seller: \`${sellerCode}\`\n` +
-          `Offer: €${offerPrice.toFixed(2)}`,
+          `Offer: €${offerPrice.toFixed(2)} (${vatType})`,
         ephemeral: true
       });
       return;
