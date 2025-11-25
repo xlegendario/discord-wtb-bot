@@ -197,20 +197,44 @@ async function getCurrentLowestForOrder(orderRecordId) {
 
   const sellerOffersTable = base(sellerOffersTableName);
 
-  // Fetch ALL seller offers and filter in JS by Linked Orders' record IDs
+  // Haal ALLE Seller Offers op en filter in JS op de Linked Orders
   const allOffers = await sellerOffersTable.select().all();
 
   const offersForOrder = allOffers.filter(rec => {
     const links = rec.get('Linked Orders');
-    return Array.isArray(links) && links.some(link => link.id === orderRecordId);
+    if (!Array.isArray(links)) return false;
+
+    return links.some(link => {
+      if (!link) return false;
+
+      // 1) Airtable-js kan alleen recordId-strings geven
+      if (typeof link === 'string') {
+        return link === orderRecordId;
+      }
+
+      // 2) In sommige omgevingen is het een object { id, name }
+      if (typeof link === 'object' && 'id' in link) {
+        return link.id === orderRecordId;
+      }
+
+      return false;
+    });
   });
+
+  console.log(
+    'Found',
+    offersForOrder.length,
+    'seller offers for order',
+    orderRecordId
+  );
 
   let best = null;
 
   for (const rec of offersForOrder) {
     const price = parseNumericField(rec.get('Seller Offer'));
     const vatTypeRaw = rec.get('Offer VAT Type');
-    // Single select → object with .name
+
+    // Single select → object met .name, of string
     const vatName =
       typeof vatTypeRaw === 'string'
         ? vatTypeRaw
@@ -218,6 +242,8 @@ async function getCurrentLowestForOrder(orderRecordId) {
 
     const vatTypeNorm = normalizeVatType(vatName);
     const normalized = getNormalizedOffer(price, vatTypeNorm);
+
+    if (!Number.isFinite(normalized)) continue;
 
     if (!best || normalized < best.normalized) {
       best = {
@@ -227,9 +253,11 @@ async function getCurrentLowestForOrder(orderRecordId) {
       };
     }
   }
+
+  // Als we minstens één offer vonden → gebruik die
   if (best) return best;
 
-  // Fallback: use Final Outsource Buying Price from the order
+  // Anders fallback naar Final Outsource Buying Price
   const orderRec = await base(ordersTableName).find(orderRecordId).catch(() => null);
   if (!orderRec) return null;
 
@@ -239,7 +267,7 @@ async function getCurrentLowestForOrder(orderRecordId) {
   return {
     normalized: fallbackVal,
     raw: fallbackVal,
-    vatType: 'Margin' // default label when only fallback is used
+    vatType: 'Margin' // label als alleen fallback gebruikt wordt
   };
 }
 
