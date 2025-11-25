@@ -202,8 +202,7 @@ async function getCurrentLowestForOrder(orderRecordId) {
 
   const offersForOrder = allOffers.filter(rec => {
     const links = rec.get('Linked Orders');
-    if (!Array.isArray(links)) return false;
-    return links.some(link => link.id === orderRecordId);
+    return Array.isArray(links) && links.some(link => link.id === orderRecordId);
   });
 
   let best = null;
@@ -220,16 +219,13 @@ async function getCurrentLowestForOrder(orderRecordId) {
     const vatTypeNorm = normalizeVatType(vatName);
     const normalized = getNormalizedOffer(price, vatTypeNorm);
 
-    if (!Number.isFinite(normalized)) continue;
-
     if (!best || normalized < best.normalized) {
       best = {
         normalized,
         raw: price,
-        vatType: vatTypeNorm || null
+        vatType: vatTypeNorm
       };
     }
-  }
 
   if (best) return best;
 
