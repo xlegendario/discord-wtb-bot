@@ -640,7 +640,8 @@ client.on(Events.InteractionCreate, async interaction => {
         'Offer VAT Type': vatType,
         'Offer Cost (Normalized)': normalizedOffer,
         'Offer Date': new Date().toISOString().split('T')[0],
-        'Seller ID': [sellerRecordId]
+        'Seller ID': [sellerRecordId],
+        'Seller Discord ID': interaction.user.id
       };
 
       if (orderRecordId) {
