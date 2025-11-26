@@ -508,6 +508,9 @@ app.post('/payout-channel', async (req, res) => {
     const baseName = `payout-${orderId}`.toLowerCase().replace(/[^a-z0-9-]/g, '-');
     const channelName = baseName.substring(0, 90) || 'payout-deal';
 
+    // Ensure the user is cached, otherwise permission overwrite fails
+    await guild.members.fetch(discordUserId).catch(() => null);
+
     const channel = await guild.channels.create({
       name: channelName,
       parent: category.id,
