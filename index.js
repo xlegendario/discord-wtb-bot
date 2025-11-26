@@ -491,7 +491,8 @@ app.post('/payout-channel', async (req, res) => {
       payout,
       sellerCode,
       imageUrl,
-      discordUserId
+      discordUserId,
+      vatType
     } = req.body || {};
 
     if (!orderId || !productName || !sku || !size || !brand || !payout || !sellerCode || !discordUserId) {
@@ -533,7 +534,8 @@ app.post('/payout-channel', async (req, res) => {
       `**Size:** ${size}`,
       `**Brand:** ${brand}`,
       `**Payout:** €${Number(payout).toFixed(2)}`,
-      `**Seller:** ${sellerCode}`
+      `**Seller:** ${sellerCode}`,
+      vatType ? `**VAT Type:** ${vatType}` : null   // 👈 NEW (optional line)
     ];
 
     const embed = new EmbedBuilder()
@@ -604,6 +606,7 @@ client.on(Events.InteractionCreate, async interaction => {
           const brand = getValueFromLines(lines, '**Brand:**');
           const payoutRaw = getValueFromLines(lines, '**Payout:**');
           const sellerCodeFromEmbed = getValueFromLines(lines, '**Seller:**') || sellerCode;
+          const vatType = getValueFromLines(lines, '**VAT Type:**');  // 👈 NEW
 
           let payoutNum = null;
           if (payoutRaw) {
@@ -626,7 +629,8 @@ client.on(Events.InteractionCreate, async interaction => {
             payout: payoutNum,
             sellerCode: sellerCodeFromEmbed,
             discordUserId: userId,
-            imageUrl
+            imageUrl,
+            vatType
           };
 
           await fetch(PROCESS_DEAL_WEBHOOK_URL, {
