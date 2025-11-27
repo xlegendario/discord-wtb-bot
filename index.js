@@ -77,7 +77,30 @@ function parseNumeric(value) {
 function getNormalized(price, vatType) {
   if (!Number.isFinite(price)) return null;
   if (vatType === 'VAT0') return price * 1.21;
-  return price;
+  return price; // Margin & VAT21 treated as “gross”
+}
+
+/**
+ * Maak een mooie string voor weergave van de huidige laagste offer,
+ * incl. alternative VAT-variant:
+ *  - 230 VAT21 → "€230.00 (VAT21) / €190.08 (VAT0)"
+ *  - 190 VAT0  → "€190.00 (VAT0) / €229.90 (VAT21)"
+ */
+function formatLowestForDisplay(lowest) {
+  if (!lowest || typeof lowest.raw !== 'number') return 'N/A';
+
+  const base = `€${lowest.raw.toFixed(2)}${lowest.vatType ? ` (${lowest.vatType})` : ''}`;
+
+  if (lowest.vatType === 'VAT21') {
+    const asVat0 = lowest.raw / 1.21;
+    return `${base} / €${asVat0.toFixed(2)} (VAT0)`;
+  }
+  if (lowest.vatType === 'VAT0') {
+    const asVat21 = lowest.raw * 1.21;
+    return `${base} / €${asVat21.toFixed(2)} (VAT21)`;
+  }
+
+  return base;
 }
 
 /* ---------------- Discord ---------------- */
@@ -121,12 +144,16 @@ async function disableSellerOfferMessages(orderId) {
     }
   }
 
-  await base(ordersTableName).update(orderId, { [ORDER_FIELD_BUTTONS_DISABLED]: true }).catch(() => null);
+  await base(ordersTableName)
+    .update(orderId, { [ORDER_FIELD_BUTTONS_DISABLED]: true })
+    .catch(() => null);
 }
 
 /* ---------------- Lowest offer calculation ---------------- */
 
 async function getCurrentLowest(orderId) {
+  if (!orderId) return null;
+
   const offers = await base(sellerOffersTableName).select().all();
 
   let best = null;
@@ -246,11 +273,14 @@ app.post('/payout-channel', async (req, res) => {
       parent: category.id,
       permissionOverwrites: [
         { id: guild.roles.everyone, deny: [PermissionsBitField.Flags.ViewChannel] },
-        { id: discordUserId, allow: [
-          PermissionsBitField.Flags.ViewChannel,
-          PermissionsBitField.Flags.SendMessages,
-          PermissionsBitField.Flags.ReadMessageHistory
-        ]}
+        {
+          id: discordUserId,
+          allow: [
+            PermissionsBitField.Flags.ViewChannel,
+            PermissionsBitField.Flags.SendMessages,
+            PermissionsBitField.Flags.ReadMessageHistory
+          ]
+        }
       ]
     });
 
@@ -301,6 +331,12 @@ client.on(Events.InteractionCreate, async interaction => {
       const [, orderId, sellerCode, discordUserId] = interaction.customId.split(':');
 
       const embed = interaction.message.embeds?.[0];
+      if (!embed || !embed.description) {
+        return interaction.reply({
+          content: '❌ Missing deal details on this message.',
+          ephemeral: true
+        });
+      }
 
       const lines = embed.description.split('\n');
 
@@ -315,7 +351,7 @@ client.on(Events.InteractionCreate, async interaction => {
         sku: get('**SKU:**'),
         size: get('**Size:**'),
         brand: get('**Brand:**'),
-        payout: parseFloat(get('**Payout:**').replace('€','')),
+        payout: parseFloat((get('**Payout:**') || '').replace('€','')),
         sellerCode,
         discordUserId,
         vatType: get('**VAT Type:**') || null,
@@ -335,7 +371,7 @@ client.on(Events.InteractionCreate, async interaction => {
     if (interaction.isButton() && interaction.customId === 'seller_offer') {
       const messageId = interaction.message.id;
 
-      // Zoek bijbehorende Order via Seller Offer Message ID
+      // Zoek de order bij dit messageId zodat we de huidige lowest kunnen tonen
       let orderRecord = null;
       try {
         const recs = await base(ordersTableName)
@@ -344,22 +380,17 @@ client.on(Events.InteractionCreate, async interaction => {
             maxRecords: 1
           })
           .firstPage();
-
         orderRecord = recs[0] || null;
-      } catch (e) {
-        console.error('Failed to find order for seller_offer button:', e);
-      }
+      } catch (_) {}
 
-      // Haal huidige laagste offer op (met VAT-logica)
       let lowest = null;
-      if (orderRecord) {
+      if (orderRecord?.id) {
         lowest = await getCurrentLowest(orderRecord.id).catch(() => null);
       }
 
       let offerPlaceholder = 'Enter your offer (e.g. 140)';
-      if (lowest && typeof lowest.raw === 'number') {
-        const vatLabel = lowest.vatType || 'N/A';
-        offerPlaceholder = `Current lowest offer: €${lowest.raw.toFixed(2)} (${vatLabel})`;
+      if (lowest) {
+        offerPlaceholder = `Current Lowest Offer: ${formatLowestForDisplay(lowest)}`;
       }
 
       const modal = new ModalBuilder()
@@ -373,7 +404,6 @@ client.on(Events.InteractionCreate, async interaction => {
             .setLabel('Seller ID (e.g. 00001)')
             .setStyle(TextInputStyle.Short)
             .setRequired(true)
-            .setPlaceholder('00001')
         ),
         new ActionRowBuilder().addComponents(
           new TextInputBuilder()
@@ -381,7 +411,6 @@ client.on(Events.InteractionCreate, async interaction => {
             .setLabel('VAT Type (Margin / VAT0 / VAT21)')
             .setStyle(TextInputStyle.Short)
             .setRequired(true)
-            .setPlaceholder('Margin / VAT0 / VAT21')
         ),
         new ActionRowBuilder().addComponents(
           new TextInputBuilder()
@@ -389,7 +418,7 @@ client.on(Events.InteractionCreate, async interaction => {
             .setLabel('Your Offer (€)')
             .setStyle(TextInputStyle.Short)
             .setRequired(true)
-            .setPlaceholder(offerPlaceholder)   // 👈 hier komt "Current lowest offer: €xxx (VATx)"
+            .setPlaceholder(offerPlaceholder)
         )
       );
 
@@ -401,7 +430,7 @@ client.on(Events.InteractionCreate, async interaction => {
     if (interaction.isModalSubmit() && interaction.customId.startsWith('seller_offer_modal:')) {
       const [_, messageId] = interaction.customId.split(':');
 
-      // find the matching order
+      // zoek de bijbehorende order
       let orderRecord = null;
       try {
         const recs = await base(ordersTableName)
@@ -411,7 +440,7 @@ client.on(Events.InteractionCreate, async interaction => {
           })
           .firstPage();
 
-        orderRecord = recs[0];
+        orderRecord = recs[0] || null;
       } catch (_) {}
 
       const orderId = orderRecord?.id || null;
@@ -437,8 +466,7 @@ client.on(Events.InteractionCreate, async interaction => {
       }
 
       const offerPrice = parseFloat(
-        interaction.fields.getTextInputValue('offer_price')
-          .replace(',', '.')
+        interaction.fields.getTextInputValue('offer_price').replace(',', '.')
       );
 
       if (!Number.isFinite(offerPrice) || offerPrice <= 0) {
@@ -450,16 +478,30 @@ client.on(Events.InteractionCreate, async interaction => {
 
       const normalizedOffer = getNormalized(offerPrice, vatInput);
 
-      // undercut logic
+      // undercut logic met human-friendly messaging
       if (orderId) {
         const lowest = await getCurrentLowest(orderId);
         if (lowest) {
           const maxAllowed = lowest.normalized - MIN_UNDERCUT_STEP;
-          if (normalizedOffer > maxAllowed) {
+
+          if (normalizedOffer > maxAllowed + 1e-9) {
+            const lowestStr = formatLowestForDisplay(lowest);
+
+            // maxAllowed ook omrekenen naar VAT0/VAT21 voor context
+            let maxDisplay = `€${maxAllowed.toFixed(2)}`;
+            if (lowest.vatType === 'VAT21') {
+              const maxVat0 = maxAllowed / 1.21;
+              maxDisplay += ` (~€${maxVat0.toFixed(2)} VAT0)`;
+            } else if (lowest.vatType === 'VAT0') {
+              const maxVat21 = maxAllowed * 1.21;
+              maxDisplay += ` (~€${maxVat21.toFixed(2)} VAT21)`;
+            }
+
             return interaction.reply({
               content:
-                `❌ Offer too high.\nCurrent lowest normalized: €${lowest.normalized.toFixed(2)}\n` +
-                `Your max allowed: €${maxAllowed.toFixed(2)}`,
+                `❌ Offer too high.\n` +
+                `Current lowest: **${lowestStr}**\n` +
+                `Your offer must be at least **€${MIN_UNDERCUT_STEP.toFixed(2)}** lower on that basis (≤ **${maxDisplay}**).`,
               ephemeral: true
             });
           }
