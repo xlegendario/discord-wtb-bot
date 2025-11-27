@@ -196,7 +196,7 @@ async function sendOfferDeal(req, res) {
     const { productName, sku, size, brand, imageUrl, recordId } = req.body || {};
 
     const embed = new EmbedBuilder()
-      .setTitle('🔥 NEW WTB DEAL (OFFER ONLY)')
+      .setTitle('🔥 NEW WTB DEAL 🔥')
       .setDescription(
         `**${productName}**\n${sku}\n${size}\n${brand}\n\nClick below to submit your offer.`
       )
@@ -501,7 +501,7 @@ client.on(Events.InteractionCreate, async interaction => {
               content:
                 `❌ Offer too high.\n` +
                 `Current lowest: **${lowestStr}**\n` +
-                `Your offer must be at least **€${MIN_UNDERCUT_STEP.toFixed(2)}** lower on that basis (≤ **${maxDisplay}**).`,
+                `Your offer must be at least **€${MIN_UNDERCUT_STEP.toFixed(2)}** lower (e.g. **${maxDisplay}**).`,
               ephemeral: true
             });
           }
