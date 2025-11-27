@@ -335,6 +335,33 @@ client.on(Events.InteractionCreate, async interaction => {
     if (interaction.isButton() && interaction.customId === 'seller_offer') {
       const messageId = interaction.message.id;
 
+      // Zoek bijbehorende Order via Seller Offer Message ID
+      let orderRecord = null;
+      try {
+        const recs = await base(ordersTableName)
+          .select({
+            filterByFormula: `SEARCH("${messageId}", {${ORDER_FIELD_SELLER_MSG_IDS}})`,
+            maxRecords: 1
+          })
+          .firstPage();
+
+        orderRecord = recs[0] || null;
+      } catch (e) {
+        console.error('Failed to find order for seller_offer button:', e);
+      }
+
+      // Haal huidige laagste offer op (met VAT-logica)
+      let lowest = null;
+      if (orderRecord) {
+        lowest = await getCurrentLowest(orderRecord.id).catch(() => null);
+      }
+
+      let offerPlaceholder = 'Enter your offer (e.g. 140)';
+      if (lowest && typeof lowest.raw === 'number') {
+        const vatLabel = lowest.vatType || 'N/A';
+        offerPlaceholder = `Current lowest offer: €${lowest.raw.toFixed(2)} (${vatLabel})`;
+      }
+
       const modal = new ModalBuilder()
         .setCustomId(`seller_offer_modal:${messageId}`)
         .setTitle('Enter Seller ID, VAT & Offer');
@@ -346,6 +373,7 @@ client.on(Events.InteractionCreate, async interaction => {
             .setLabel('Seller ID (e.g. 00001)')
             .setStyle(TextInputStyle.Short)
             .setRequired(true)
+            .setPlaceholder('00001')
         ),
         new ActionRowBuilder().addComponents(
           new TextInputBuilder()
@@ -353,6 +381,7 @@ client.on(Events.InteractionCreate, async interaction => {
             .setLabel('VAT Type (Margin / VAT0 / VAT21)')
             .setStyle(TextInputStyle.Short)
             .setRequired(true)
+            .setPlaceholder('Margin / VAT0 / VAT21')
         ),
         new ActionRowBuilder().addComponents(
           new TextInputBuilder()
@@ -360,6 +389,7 @@ client.on(Events.InteractionCreate, async interaction => {
             .setLabel('Your Offer (€)')
             .setStyle(TextInputStyle.Short)
             .setRequired(true)
+            .setPlaceholder(offerPlaceholder)   // 👈 hier komt "Current lowest offer: €xxx (VATx)"
         )
       );
 
