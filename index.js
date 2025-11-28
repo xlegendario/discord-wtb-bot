@@ -74,15 +74,19 @@ function parseNumeric(value) {
   return null;
 }
 
+/**
+ * Normalize an offer for comparison:
+ * - VAT0 → *1.21
+ * - Margin/VAT21 → as-is (treated as gross)
+ */
 function getNormalized(price, vatType) {
   if (!Number.isFinite(price)) return null;
   if (vatType === 'VAT0') return price * 1.21;
-  return price; // Margin & VAT21 treated as “gross”
+  return price;
 }
 
 /**
- * Maak een mooie string voor weergave van de huidige laagste offer,
- * incl. alternative VAT-variant:
+ * Pretty display string for the current lowest offer, plus the alternative VAT view:
  *  - 230 VAT21 → "€230.00 (VAT21) / €190.08 (VAT0)"
  *  - 190 VAT0  → "€190.00 (VAT0) / €229.90 (VAT21)"
  */
@@ -103,10 +107,16 @@ function formatLowestForDisplay(lowest) {
   return base;
 }
 
-// Safe DM helper
-async function safeDM(user, content) {
+// Safe DM helper with "Retry Offer" button
+async function safeDMWithRetry(user, content, retryCustomId) {
   try {
-    await user.send(content);
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(retryCustomId)
+        .setLabel('Retry Offer')
+        .setStyle(ButtonStyle.Primary)
+    );
+    await user.send({ content, components: [row] });
   } catch (e) {
     console.warn('DM failed:', e.message);
   }
@@ -187,7 +197,20 @@ async function getCurrentLowest(orderId) {
     }
   }
 
-  return best;
+  if (best) return best;
+
+  // 🔹 Fallback: if there are no offers yet, use order's Maximum Buying Price as baseline
+  const order = await base(ordersTableName).find(orderId).catch(() => null);
+  if (!order) return null;
+
+  const maxPrice = parseNumeric(order.get('Maximum Buying Price'));
+  if (!Number.isFinite(maxPrice)) return null;
+
+  return {
+    normalized: maxPrice, // treat this as gross baseline
+    raw: maxPrice,
+    vatType: 'VAT21'      // label as gross (can rename to 'Margin' if you prefer)
+  };
 }
 
 /* ---------------- Express API ---------------- */
@@ -385,11 +408,71 @@ client.on(Events.InteractionCreate, async interaction => {
       return interaction.reply({ content: '✅ Deal sent to processing.', ephemeral: true });
     }
 
-    /* ---- OFFER BUTTON ---- */
+    /* ---- RETRY OFFER BUTTON (in DM) ---- */
+    if (interaction.isButton() && interaction.customId.startsWith('retry_offer:')) {
+      const [, guildId, channelId, messageId] = interaction.customId.split(':');
+      // We only really need messageId; guildId/channelId are just for traceability
+
+      // Find order for placeholder
+      let orderRecord = null;
+      try {
+        const recs = await base(ordersTableName)
+          .select({
+            filterByFormula: `SEARCH("${messageId}", {${ORDER_FIELD_SELLER_MSG_IDS}})`,
+            maxRecords: 1
+          })
+          .firstPage();
+        orderRecord = recs[0] || null;
+      } catch (_) {}
+
+      let lowest = null;
+      if (orderRecord?.id) {
+        lowest = await getCurrentLowest(orderRecord.id).catch(() => null);
+      }
+
+      let offerPlaceholder = 'Enter your offer (e.g. 140)';
+      if (lowest) {
+        offerPlaceholder = `Current Lowest Offer: ${formatLowestForDisplay(lowest)}`;
+      }
+
+      const modal = new ModalBuilder()
+        .setCustomId(`seller_offer_modal:${messageId}`)
+        .setTitle('Enter Seller ID, VAT & Offer');
+
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId('seller_id')
+            .setLabel('Seller ID (e.g. 00001)')
+            .setStyle(TextInputStyle.Short)
+            .setRequired(true)
+        ),
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId('vat_type')
+            .setLabel('VAT Type (Margin / VAT0 / VAT21)')
+            .setStyle(TextInputStyle.Short)
+            .setRequired(true)
+        ),
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId('offer_price')
+            .setLabel('Your Offer (€)')
+            .setStyle(TextInputStyle.Short)
+            .setRequired(true)
+            .setPlaceholder(offerPlaceholder)
+        )
+      );
+
+      await interaction.showModal(modal);
+      return;
+    }
+
+    /* ---- OFFER BUTTON (in WTB channel) ---- */
     if (interaction.isButton() && interaction.customId === 'seller_offer') {
       const messageId = interaction.message.id;
 
-      // Zoek de order bij dit messageId zodat we de huidige lowest kunnen tonen
+      // Look up order via Seller Offer Message ID so we can show current lowest
       let orderRecord = null;
       try {
         const recs = await base(ordersTableName)
@@ -452,7 +535,7 @@ client.on(Events.InteractionCreate, async interaction => {
         ? `https://discord.com/channels/${interaction.guildId}/${interaction.channelId}/${messageId}`
         : null;
 
-      // zoek de bijbehorende order
+      // Find the order for this message
       let orderRecord = null;
       try {
         const recs = await base(ordersTableName)
@@ -468,16 +551,22 @@ client.on(Events.InteractionCreate, async interaction => {
       const orderId = orderRecord?.id || null;
 
       const sellerDigits = interaction.fields.getTextInputValue('seller_id').trim();
+      const retryCustomId =
+        interaction.guildId && interaction.channelId
+          ? `retry_offer:${interaction.guildId}:${interaction.channelId}:${messageId}`
+          : null;
+
       if (!/^\d+$/.test(sellerDigits)) {
         const msg = '❌ Seller ID must be digits only.';
         await interaction.reply({
           content: msg,
           ephemeral: true
         });
-        if (jumpUrl) {
-          await safeDM(
+        if (retryCustomId) {
+          await safeDMWithRetry(
             interaction.user,
-            `${msg}\n\nYou can try again by clicking **Offer** on this message:\n${jumpUrl}`
+            `${msg}\n\nYou can try again by clicking the button below.`,
+            retryCustomId
           );
         }
         return;
@@ -494,10 +583,11 @@ client.on(Events.InteractionCreate, async interaction => {
           content: msg,
           ephemeral: true
         });
-        if (jumpUrl) {
-          await safeDM(
+        if (retryCustomId) {
+          await safeDMWithRetry(
             interaction.user,
-            `${msg}\n\nYou can try again by clicking **Offer** on this message:\n${jumpUrl}`
+            `${msg}\n\nYou can try again by clicking the button below.`,
+            retryCustomId
           );
         }
         return;
@@ -513,10 +603,11 @@ client.on(Events.InteractionCreate, async interaction => {
           content: msg,
           ephemeral: true
         });
-        if (jumpUrl) {
-          await safeDM(
+        if (retryCustomId) {
+          await safeDMWithRetry(
             interaction.user,
-            `${msg}\n\nYou can try again by clicking **Offer** on this message:\n${jumpUrl}`
+            `${msg}\n\nYou can try again by clicking the button below.`,
+            retryCustomId
           );
         }
         return;
@@ -524,39 +615,49 @@ client.on(Events.InteractionCreate, async interaction => {
 
       const normalizedOffer = getNormalized(offerPrice, vatInput);
 
-      // undercut logic met human-friendly messaging
+      // undercut logic with human-friendly messaging
       if (orderId) {
         const lowest = await getCurrentLowest(orderId);
         if (lowest) {
-          const maxAllowed = lowest.normalized - MIN_UNDERCUT_STEP;
+          const maxAllowedGross = lowest.normalized - MIN_UNDERCUT_STEP;
 
-          if (normalizedOffer > maxAllowed + 1e-9) {
+          if (normalizedOffer > maxAllowedGross + 1e-9) {
             const lowestStr = formatLowestForDisplay(lowest);
 
-            // maxAllowed ook omrekenen naar VAT0/VAT21 voor context
-            let maxDisplay = `€${maxAllowed.toFixed(2)}`;
-            if (lowest.vatType === 'VAT21') {
-              const maxVat0 = maxAllowed / 1.21;
-              maxDisplay += ` (~€${maxVat0.toFixed(2)} VAT0)`;
-            } else if (lowest.vatType === 'VAT0') {
-              const maxVat21 = maxAllowed * 1.21;
-              maxDisplay += ` (~€${maxVat21.toFixed(2)} VAT21)`;
+            // Convert maxAllowedGross into the seller's VAT type
+            let maxForSeller = maxAllowedGross;
+            if (vatInput === 'VAT0') {
+              maxForSeller = maxAllowedGross / 1.21;
+            }
+            const maxForSellerRounded = Math.floor(maxForSeller * 100) / 100;
+
+            let maxDisplay = `€${maxForSellerRounded.toFixed(2)} (${vatInput})`;
+            let altDisplay = '';
+
+            if (vatInput === 'VAT0') {
+              const equivVat21 = maxForSellerRounded * 1.21;
+              altDisplay = ` / ≈€${equivVat21.toFixed(2)} (VAT21)`;
+            } else if (vatInput === 'VAT21') {
+              const equivVat0 = maxForSellerRounded / 1.21;
+              altDisplay = ` / ≈€${equivVat0.toFixed(2)} (VAT0)`;
             }
 
             const msg =
               `❌ Offer too high.\n` +
               `Current lowest: **${lowestStr}**\n` +
-              `Your offer must be at least **€${MIN_UNDERCUT_STEP.toFixed(2)}** lower (e.g. **${maxDisplay}**).`;
+              `Your offer must be at least **€${MIN_UNDERCUT_STEP.toFixed(2)}** lower than that.\n` +
+              `Max allowed for your VAT type: **${maxDisplay}${altDisplay}**.`;
 
             await interaction.reply({
               content: msg,
               ephemeral: true
             });
 
-            if (jumpUrl) {
-              await safeDM(
+            if (retryCustomId) {
+              await safeDMWithRetry(
                 interaction.user,
-                `${msg}\n\nYour offer was **not** saved. You can try again by clicking **Offer** on this message:\n${jumpUrl}`
+                `${msg}\n\nYour offer was **not** saved. You can try again by clicking the button below.`,
+                retryCustomId
               );
             }
             return;
@@ -579,10 +680,11 @@ client.on(Events.InteractionCreate, async interaction => {
           content: msg,
           ephemeral: true
         });
-        if (jumpUrl) {
-          await safeDM(
+        if (retryCustomId) {
+          await safeDMWithRetry(
             interaction.user,
-            `${msg}\n\nPlease check your Seller ID and try again by clicking **Offer** on this message:\n${jumpUrl}`
+            `${msg}\n\nPlease check your Seller ID and try again by clicking the button below.`,
+            retryCustomId
           );
         }
         return;
