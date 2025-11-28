@@ -103,6 +103,15 @@ function formatLowestForDisplay(lowest) {
   return base;
 }
 
+// Safe DM helper
+async function safeDM(user, content) {
+  try {
+    await user.send(content);
+  } catch (e) {
+    console.warn('DM failed:', e.message);
+  }
+}
+
 /* ---------------- Discord ---------------- */
 
 const client = new Client({
@@ -205,6 +214,7 @@ async function sendOfferDeal(req, res) {
     if (imageUrl) embed.setImage(imageUrl);
 
     const messageIds = [];
+    const messageUrls = [];
 
     for (const channelId of dealsChannelIds) {
       const channel = await client.channels.fetch(channelId).catch(() => null);
@@ -223,16 +233,24 @@ async function sendOfferDeal(req, res) {
       });
 
       messageIds.push(msg.id);
+      messageUrls.push(msg.url);
     }
 
     if (recordId) {
-      await base(ordersTableName).update(recordId, {
+      const updateFields = {
         [ORDER_FIELD_SELLER_MSG_IDS]: messageIds.join(','),
         [ORDER_FIELD_BUTTONS_DISABLED]: false
-      });
+      };
+
+      // Save first message URL as "Offer Message URL"
+      if (messageUrls.length > 0) {
+        updateFields['Offer Message URL'] = messageUrls[0];
+      }
+
+      await base(ordersTableName).update(recordId, updateFields);
     }
 
-    return res.json({ ok: true, messageIds });
+    return res.json({ ok: true, messageIds, messageUrls });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ error: 'Internal error' });
@@ -430,6 +448,10 @@ client.on(Events.InteractionCreate, async interaction => {
     if (interaction.isModalSubmit() && interaction.customId.startsWith('seller_offer_modal:')) {
       const [_, messageId] = interaction.customId.split(':');
 
+      const jumpUrl = (interaction.guildId && interaction.channelId && messageId)
+        ? `https://discord.com/channels/${interaction.guildId}/${interaction.channelId}/${messageId}`
+        : null;
+
       // zoek de bijbehorende order
       let orderRecord = null;
       try {
@@ -447,10 +469,18 @@ client.on(Events.InteractionCreate, async interaction => {
 
       const sellerDigits = interaction.fields.getTextInputValue('seller_id').trim();
       if (!/^\d+$/.test(sellerDigits)) {
-        return interaction.reply({
-          content: '❌ Seller ID must be digits only.',
+        const msg = '❌ Seller ID must be digits only.';
+        await interaction.reply({
+          content: msg,
           ephemeral: true
         });
+        if (jumpUrl) {
+          await safeDM(
+            interaction.user,
+            `${msg}\n\nYou can try again by clicking **Offer** on this message:\n${jumpUrl}`
+          );
+        }
+        return;
       }
 
       const sellerCode = `SE-${sellerDigits}`;
@@ -459,10 +489,18 @@ client.on(Events.InteractionCreate, async interaction => {
         interaction.fields.getTextInputValue('vat_type').trim()
       );
       if (!vatInput) {
-        return interaction.reply({
-          content: '❌ VAT Type must be one of: Margin, VAT0, VAT21.',
+        const msg = '❌ VAT Type must be one of: Margin, VAT0, VAT21.';
+        await interaction.reply({
+          content: msg,
           ephemeral: true
         });
+        if (jumpUrl) {
+          await safeDM(
+            interaction.user,
+            `${msg}\n\nYou can try again by clicking **Offer** on this message:\n${jumpUrl}`
+          );
+        }
+        return;
       }
 
       const offerPrice = parseFloat(
@@ -470,10 +508,18 @@ client.on(Events.InteractionCreate, async interaction => {
       );
 
       if (!Number.isFinite(offerPrice) || offerPrice <= 0) {
-        return interaction.reply({
-          content: '❌ Invalid offer price.',
+        const msg = '❌ Invalid offer price.';
+        await interaction.reply({
+          content: msg,
           ephemeral: true
         });
+        if (jumpUrl) {
+          await safeDM(
+            interaction.user,
+            `${msg}\n\nYou can try again by clicking **Offer** on this message:\n${jumpUrl}`
+          );
+        }
+        return;
       }
 
       const normalizedOffer = getNormalized(offerPrice, vatInput);
@@ -497,13 +543,23 @@ client.on(Events.InteractionCreate, async interaction => {
               maxDisplay += ` (~€${maxVat21.toFixed(2)} VAT21)`;
             }
 
-            return interaction.reply({
-              content:
-                `❌ Offer too high.\n` +
-                `Current lowest: **${lowestStr}**\n` +
-                `Your offer must be at least **€${MIN_UNDERCUT_STEP.toFixed(2)}** lower (e.g. **${maxDisplay}**).`,
+            const msg =
+              `❌ Offer too high.\n` +
+              `Current lowest: **${lowestStr}**\n` +
+              `Your offer must be at least **€${MIN_UNDERCUT_STEP.toFixed(2)}** lower (e.g. **${maxDisplay}**).`;
+
+            await interaction.reply({
+              content: msg,
               ephemeral: true
             });
+
+            if (jumpUrl) {
+              await safeDM(
+                interaction.user,
+                `${msg}\n\nYour offer was **not** saved. You can try again by clicking **Offer** on this message:\n${jumpUrl}`
+              );
+            }
+            return;
           }
         }
       }
@@ -518,10 +574,18 @@ client.on(Events.InteractionCreate, async interaction => {
 
       const sellerRecordId = sellers[0]?.id;
       if (!sellerRecordId) {
-        return interaction.reply({
-          content: `❌ Seller ${sellerCode} not found.`,
+        const msg = `❌ Seller ${sellerCode} not found.`;
+        await interaction.reply({
+          content: msg,
           ephemeral: true
         });
+        if (jumpUrl) {
+          await safeDM(
+            interaction.user,
+            `${msg}\n\nPlease check your Seller ID and try again by clicking **Offer** on this message:\n${jumpUrl}`
+          );
+        }
+        return;
       }
 
       const fields = {
