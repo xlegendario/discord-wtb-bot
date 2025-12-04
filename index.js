@@ -217,7 +217,7 @@ async function getCurrentLowest(orderId) {
   return {
     normalized: maxPrice, // treat this as gross baseline
     raw: maxPrice,
-    vatType: 'VAT21'      // label as gross (can rename to 'Margin' if you prefer)
+    vatType: 'Margin'      // label as gross (can rename to 'Margin' if you prefer)
   };
 }
 
@@ -643,12 +643,13 @@ client.on(Events.InteractionCreate, async interaction => {
             let altDisplay = '';
 
             if (vatInput === 'VAT0') {
-              const equivVat21 = maxForSellerRounded * 1.21;
-              altDisplay = ` / ≈€${equivVat21.toFixed(2)} (VAT21)`;
+              const equivMargin = maxForSellerRounded * 1.21;
+              altDisplay = ` / ≈€${equivMargin.toFixed(2)} (Margin)`;
             } else if (vatInput === 'VAT21') {
               const equivVat0 = maxForSellerRounded / 1.21;
               altDisplay = ` / ≈€${equivVat0.toFixed(2)} (VAT0)`;
             }
+
 
             const msg =
               `❌ Offer too high.\n` +
