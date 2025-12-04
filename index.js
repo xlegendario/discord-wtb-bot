@@ -42,6 +42,10 @@ const dealsChannelIds = DISCORD_DEALS_CHANNEL_ID.split(',')
   .map(id => id.trim())
   .filter(Boolean);
 
+const WTB_URL =
+  'https://airtable.com/invite/l?inviteId=invwmhpKlD6KmJe6n&inviteToken=a14697b7435e64f6ee429f8b59fbb07bc0474aaf66c8ff59068aa5ceb2842253&utm_medium=email&utm_source=product_team&utm_content=transactional-alerts';
+
+
 /* ---------------- Airtable ---------------- */
 
 const base = new Airtable({ apiKey: AIRTABLE_API_KEY }).base(AIRTABLE_BASE_ID);
@@ -721,22 +725,34 @@ client.on(Events.InteractionCreate, async interaction => {
 
       await base(sellerOffersTableName).create(fields);
 
-      // ✅ DM confirmation
-      await safeDM(
-        interaction.user,
-        `Hi ${interaction.user.tag}, your offer has successfully been placed.\n\n` +
-        `If your offer gets accepted, we will create a private channel with you to confirm!\n` +
-        `In the meantime, you can keep an eye on our WTB page to see if your offer is still the lowest:\n` +
-        `👉 [click here](https://airtable.com/invite/l?inviteId=invwmhpKlD6KmJe6n&inviteToken=a14697b7435e64f6ee429f8b59fbb07bc0474aaf66c8ff59068aa5ceb2842253&utm_medium=email&utm_source=product_team&utm_content=transactional-alerts)`
-      );
-
-      return interaction.reply({
+      // Ephemeral confirmation in the channel
+      await interaction.reply({
         content:
           `✅ Offer submitted.\n` +
           `Seller: ${sellerCode}\n` +
           `Offer: €${offerPrice.toFixed(2)} (${vatInput})`,
         ephemeral: true
       });
+
+      // Extra confirmation via DM with a "Go To WTB" button (no Airtable embed)
+      try {
+        const dmRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setLabel('Go To WTB')
+            .setStyle(ButtonStyle.Link) // link-style button → no preview
+            .setURL(WTB_URL)
+        );
+
+        await interaction.user.send({
+          content:
+            `Hi ${interaction.user}, your offer has been placed successfully.\n` +
+            `If your offer gets accepted, we'll open a private channel with you to confirm the deal.\n\n` +
+            `In the meantime you can keep an eye on our WTB page to see if your offer is still the lowest:`,
+          components: [dmRow]
+        });
+      } catch (e) {
+        console.warn('DM confirmation failed:', e.message);
+      }
     }
   } catch (err) {
     console.error('Interaction error:', err);
