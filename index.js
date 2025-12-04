@@ -727,7 +727,7 @@ client.on(Events.InteractionCreate, async interaction => {
         `Hi ${interaction.user.tag}, your offer has successfully been placed.\n\n` +
         `If your offer gets accepted, we will create a private channel with you to confirm!\n` +
         `In the meantime, you can keep an eye on our WTB page to see if your offer is still the lowest:\n` +
-        `👉[click here](https://airtable.com/invite/l?inviteId=invwmhpKlD6KmJe6n&inviteToken=a14697b7435e64f6ee429f8b59fbb07bc0474aaf66c8ff59068aa5ceb2842253&utm_medium=email&utm_source=product_team&utm_content=transactional-alerts)`
+        `👉 [click here](https://airtable.com/invite/l?inviteId=invwmhpKlD6KmJe6n&inviteToken=a14697b7435e64f6ee429f8b59fbb07bc0474aaf66c8ff59068aa5ceb2842253&utm_medium=email&utm_source=product_team&utm_content=transactional-alerts)`
       );
 
       return interaction.reply({
