@@ -129,6 +129,15 @@ async function safeDMWithRetry(user, content, retryCustomId) {
     console.warn('DM failed:', e.message);
   }
 }
+// Safe DM helper with confirmation
+async function safeDM(user, content) {
+  try {
+    await user.send({ content });
+  } catch (e) {
+    console.warn('DM confirm failed:', e.message);
+  }
+}
+
 
 /* ---------------- Discord ---------------- */
 
@@ -711,6 +720,15 @@ client.on(Events.InteractionCreate, async interaction => {
       if (orderId) fields['Linked Orders'] = [orderId];
 
       await base(sellerOffersTableName).create(fields);
+
+      // ✅ DM confirmation
+      await safeDM(
+        interaction.user,
+        `Hi ${interaction.user.tag}, your offer has successfully been placed.\n\n` +
+        `If your offer gets accepted, we will create a private channel with you to confirm!\n` +
+        `In the meantime, you can keep an eye on our WTB page to see if your offer is still the lowest:\n` +
+        `👉[click here](https://airtable.com/invite/l?inviteId=invwmhpKlD6KmJe6n&inviteToken=a14697b7435e64f6ee429f8b59fbb07bc0474aaf66c8ff59068aa5ceb2842253&utm_medium=email&utm_source=product_team&utm_content=transactional-alerts)`
+      );
 
       return interaction.reply({
         content:
