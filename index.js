@@ -97,26 +97,32 @@ function getNormalized(price, vatType) {
 function formatLowestForDisplay(lowest) {
   if (!lowest || typeof lowest.raw !== 'number') return 'N/A';
 
-  // Main label logic
-  let displayType = lowest.vatType;
-  if (lowest.vatType === 'VAT21') {
-    displayType = 'Margin';
-  }
+  // Margin & VAT21 are both treated as gross prices
+  const isGross = lowest.vatType === 'VAT21' || lowest.vatType === 'Margin';
 
-  const base = `€${lowest.raw.toFixed(2)}${displayType ? ` (${displayType})` : ''}`;
+  // What label do we show on the main price?
+  const mainLabel = isGross
+    ? 'Margin'                 // show "Margin" for both Margin & VAT21
+    : (lowest.vatType || '');  // VAT0 stays VAT0
 
-  if (lowest.vatType === 'VAT21') {
+  const base = `€${lowest.raw.toFixed(2)}${mainLabel ? ` (${mainLabel})` : ''}`;
+
+  // Gross (Margin / VAT21) → also show VAT0
+  if (isGross) {
     const asVat0 = lowest.raw / 1.21;
     return `${base} / €${asVat0.toFixed(2)} (VAT0)`;
   }
 
+  // Net (VAT0) → also show Margin (gross)
   if (lowest.vatType === 'VAT0') {
-    const asVat21 = lowest.raw * 1.21;
-    return `${base} / €${asVat21.toFixed(2)} (Margin)`;
+    const asMargin = lowest.raw * 1.21;
+    return `${base} / €${asMargin.toFixed(2)} (Margin)`;
   }
 
+  // Fallback (shouldn’t really happen, but just in case)
   return base;
 }
+
 
 
 // Safe DM helper with "Retry Offer" button
