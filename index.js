@@ -23,6 +23,7 @@ import {
 const {
   DISCORD_TOKEN,
   DISCORD_DEALS_CHANNEL_ID,
+  DISCORD_PARTNER_WTB_CHANNEL_ID,          // 👈 NEW: partner WTB channels
   AIRTABLE_API_KEY,
   AIRTABLE_BASE_ID,
   AIRTABLE_SELLER_OFFERS_TABLE,
@@ -39,6 +40,12 @@ if (!DISCORD_TOKEN || !DISCORD_DEALS_CHANNEL_ID || !AIRTABLE_API_KEY || !AIRTABL
 }
 
 const dealsChannelIds = DISCORD_DEALS_CHANNEL_ID.split(',')
+  .map(id => id.trim())
+  .filter(Boolean);
+
+// 👇 NEW: partner WTB channels (for “Go To Server” embeds)
+const partnerWtbChannelIds = (DISCORD_PARTNER_WTB_CHANNEL_ID || '')
+  .split(',')
   .map(id => id.trim())
   .filter(Boolean);
 
@@ -91,39 +98,31 @@ function getNormalized(price, vatType) {
 
 /**
  * Pretty display string for the current lowest offer, plus the alternative VAT view:
- *  - 230 VAT21 → "€230.00 (VAT21) / €190.08 (VAT0)"
- *  - 190 VAT0  → "€190.00 (VAT0) / €229.90 (VAT21)"
+ *  - 230 VAT21 → "€230.00 (Margin) / €190.08 (VAT0)"
+ *  - 190 VAT0  → "€190.00 (VAT0) / €229.90 (Margin)"
  */
 function formatLowestForDisplay(lowest) {
   if (!lowest || typeof lowest.raw !== 'number') return 'N/A';
 
-  // Margin & VAT21 are both treated as gross prices
-  const isGross = lowest.vatType === 'VAT21' || lowest.vatType === 'Margin';
+  let displayType = lowest.vatType;
+  if (lowest.vatType === 'VAT21') {
+    displayType = 'Margin';
+  }
 
-  // What label do we show on the main price?
-  const mainLabel = isGross
-    ? 'Margin'                 // show "Margin" for both Margin & VAT21
-    : (lowest.vatType || '');  // VAT0 stays VAT0
+  const base = `€${lowest.raw.toFixed(2)}${displayType ? ` (${displayType})` : ''}`;
 
-  const base = `€${lowest.raw.toFixed(2)}${mainLabel ? ` (${mainLabel})` : ''}`;
-
-  // Gross (Margin / VAT21) → also show VAT0
-  if (isGross) {
+  if (lowest.vatType === 'VAT21') {
     const asVat0 = lowest.raw / 1.21;
     return `${base} / €${asVat0.toFixed(2)} (VAT0)`;
   }
 
-  // Net (VAT0) → also show Margin (gross)
   if (lowest.vatType === 'VAT0') {
-    const asMargin = lowest.raw * 1.21;
-    return `${base} / €${asMargin.toFixed(2)} (Margin)`;
+    const asVat21 = lowest.raw * 1.21;
+    return `${base} / €${asVat21.toFixed(2)} (Margin)`;
   }
 
-  // Fallback (shouldn’t really happen, but just in case)
   return base;
 }
-
-
 
 // Safe DM helper with "Retry Offer" button
 async function safeDMWithRetry(user, content, retryCustomId) {
@@ -139,7 +138,8 @@ async function safeDMWithRetry(user, content, retryCustomId) {
     console.warn('DM failed:', e.message);
   }
 }
-// Safe DM helper with confirmation
+
+// Simple DM helper
 async function safeDM(user, content) {
   try {
     await user.send({ content });
@@ -236,7 +236,7 @@ async function getCurrentLowest(orderId) {
   return {
     normalized: maxPrice, // treat this as gross baseline
     raw: maxPrice,
-    vatType: 'Margin'      // label as gross (can rename to 'Margin' if you prefer)
+    vatType: 'Margin'
   };
 }
 
@@ -249,6 +249,7 @@ app.use(express.json({ limit: '2mb' }));
 app.get('/', (_req, res) => res.send('WTB Seller Offers Bot OK'));
 
 /* ---------------- POST /partner-offer-deal ---------------- */
+/* (your internal WTB in your own server – unchanged) */
 
 async function sendOfferDeal(req, res) {
   try {
@@ -310,6 +311,66 @@ async function sendOfferDeal(req, res) {
 app.post('/partner-offer-deal', sendOfferDeal);
 app.post('/partner-deal', sendOfferDeal);
 
+/* ---------------- NEW: POST /partner-wtb ---------------- */
+/* Sends WTB embed into partner servers with "Go To Server" link button */
+
+app.post('/partner-wtb', async (req, res) => {
+  try {
+    const { productName, sku, size, brand, imageUrl, recordId } = req.body || {};
+
+    if (!recordId) {
+      return res.status(400).json({ error: 'recordId is required' });
+    }
+
+    // Get Offer Message URL from Airtable
+    const order = await base(ordersTableName).find(recordId).catch(() => null);
+    if (!order) {
+      return res.status(404).json({ error: 'Order not found in Airtable' });
+    }
+
+    const offerMessageUrl = order.get('Offer Message URL');
+    if (!offerMessageUrl) {
+      return res.status(400).json({ error: 'Offer Message URL is empty for this order' });
+    }
+
+    const embed = new EmbedBuilder()
+      .setTitle('🔥 NEW WTB DEAL 🔥')
+      .setDescription(
+        `**${productName}**\n${sku}\n${size}\n${brand}\n\n` +
+        `Click below to go to the WTB in our server and place your offer.`
+      )
+      .setColor(0xf1c40f);
+
+    if (imageUrl) embed.setImage(imageUrl);
+
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setLabel('Go To Server')
+        .setStyle(ButtonStyle.Link)   // link button → no interaction handler needed
+        .setURL(offerMessageUrl)
+    );
+
+    const sentIds = [];
+
+    for (const channelId of partnerWtbChannelIds) {
+      const channel = await client.channels.fetch(channelId).catch(() => null);
+      if (!channel) continue;
+
+      const msg = await channel.send({
+        embeds: [embed],
+        components: [row]
+      });
+
+      sentIds.push(msg.id);
+    }
+
+    return res.json({ ok: true, messageIds: sentIds });
+  } catch (err) {
+    console.error('Error in /partner-wtb:', err);
+    return res.status(500).json({ error: 'Internal error' });
+  }
+});
+
 /* ---------------- POST /seller-offer/disable ---------------- */
 
 app.post('/seller-offer/disable', async (req, res) => {
@@ -321,6 +382,7 @@ app.post('/seller-offer/disable', async (req, res) => {
 });
 
 /* ---------------- POST /payout-channel ---------------- */
+
 
 app.post('/payout-channel', async (req, res) => {
   try {
