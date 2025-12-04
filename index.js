@@ -93,19 +93,27 @@ function getNormalized(price, vatType) {
 function formatLowestForDisplay(lowest) {
   if (!lowest || typeof lowest.raw !== 'number') return 'N/A';
 
-  const base = `€${lowest.raw.toFixed(2)}${lowest.vatType ? ` (${lowest.vatType})` : ''}`;
+  // Main label logic
+  let displayType = lowest.vatType;
+  if (lowest.vatType === 'VAT21') {
+    displayType = 'Margin';
+  }
+
+  const base = `€${lowest.raw.toFixed(2)}${displayType ? ` (${displayType})` : ''}`;
 
   if (lowest.vatType === 'VAT21') {
     const asVat0 = lowest.raw / 1.21;
     return `${base} / €${asVat0.toFixed(2)} (VAT0)`;
   }
+
   if (lowest.vatType === 'VAT0') {
     const asVat21 = lowest.raw * 1.21;
-    return `${base} / €${asVat21.toFixed(2)} (VAT21)`;
+    return `${base} / €${asVat21.toFixed(2)} (Margin)`;
   }
 
   return base;
 }
+
 
 // Safe DM helper with "Retry Offer" button
 async function safeDMWithRetry(user, content, retryCustomId) {
