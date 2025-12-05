@@ -582,7 +582,7 @@ app.post('/payout-channel', async (req, res) => {
         `**Seller:** ${sellerCode}\n` +
         (vatType ? `**VAT Type:** ${vatType}\n` : '')
       )
-      .setColor(0x57F287);
+      .setColor(0xf1c40f);
 
     if (imageUrl) embed.setImage(imageUrl);
 
