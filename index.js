@@ -63,8 +63,8 @@ const ordersTableName       = AIRTABLE_ORDERS_TABLE        || 'Unfulfilled Order
 
 const ORDER_FIELD_SELLER_MSG_IDS        = 'Seller Offer Message ID';
 const ORDER_FIELD_BUTTONS_DISABLED      = 'Seller Offer Buttons Disabled';
-const ORDER_FIELD_PARTNER_WTB_MSG_IDS   = 'Partner WTB Message IDs';     // NEW
-const ORDER_FIELD_CURRENT_LOWEST_OFFER  = 'Current Lowest Offer';        // Airtable field you trigger on
+const ORDER_FIELD_PARTNER_WTB_MSG_IDS   = 'Partner WTB Message IDs';
+const ORDER_FIELD_CURRENT_LOWEST_OFFER  = 'Current Lowest Offer';
 
 /* ---------------- Utilities ---------------- */
 
@@ -99,9 +99,7 @@ function getNormalized(price, vatType) {
 }
 
 /**
- * Pretty display string for the current lowest offer, plus the alternative VAT view:
- *  - 230 VAT21 → "€230.00 (Margin) / €190.08 (VAT0)"
- *  - 190 VAT0  → "€190.00 (VAT0) / €229.90 (Margin)"
+ * Pretty display using VAT logic (still used for undercut messaging).
  */
 function formatLowestForDisplay(lowest) {
   if (!lowest || typeof lowest.raw !== 'number') return 'N/A';
@@ -225,8 +223,7 @@ async function disableSellerOfferMessages(orderId) {
     .catch(() => null);
 }
 
-
-/* ---------------- Lowest offer calculation (for logic / placeholder) ---------------- */
+/* ---------------- Lowest offer calculation (for logic / placeholder in errors etc.) ---------------- */
 
 async function getCurrentLowest(orderId) {
   if (!orderId) return null;
@@ -265,7 +262,7 @@ async function getCurrentLowest(orderId) {
   if (!Number.isFinite(maxPrice)) return null;
 
   return {
-    normalized: maxPrice, // treat this as gross baseline
+    normalized: maxPrice,
     raw: maxPrice,
     vatType: 'Margin'
   };
@@ -279,7 +276,6 @@ async function updateLowestOfferDisplays(orderId) {
   const order = await base(ordersTableName).find(orderId).catch(() => null);
   if (!order) return;
 
-  // Read the CURRENT LOWEST OFFER TEXT from Airtable
   const currentLowestRaw = order.get(ORDER_FIELD_CURRENT_LOWEST_OFFER);
   const currentLowestDisplay = currentLowestRaw ? String(currentLowestRaw) : 'No offers yet';
 
@@ -312,7 +308,7 @@ async function updateLowestOfferDisplays(orderId) {
 
         filteredFields.push({
           name: 'Current Lowest Offer',
-          value: currentLowestDisplay,
+          value: `${currentLowestDisplay}\n\nClick below to submit your offer.`,
           inline: false
         });
 
@@ -352,7 +348,7 @@ async function updateLowestOfferDisplays(orderId) {
 
         filteredFields.push({
           name: 'Current Lowest Offer',
-          value: currentLowestDisplay,
+          value: `${currentLowestDisplay}\n\nClick below to go to the WTB in our server and place your offer.`,
           inline: false
         });
 
@@ -392,12 +388,12 @@ async function sendOfferDeal(req, res) {
     const embed = new EmbedBuilder()
       .setTitle('🔥 NEW WTB DEAL 🔥')
       .setDescription(
-        `**${productName}**\n${sku}\n${size}\n${brand}\n\nClick below to submit your offer.`
+        `**${productName}**\n${sku}\n${size}\n${brand}`
       )
       .setColor(0xf1c40f)
       .addFields({
         name: 'Current Lowest Offer',
-        value: currentLowestDisplay,
+        value: `${currentLowestDisplay}\n\nClick below to submit your offer.`,
         inline: false
       });
 
@@ -483,13 +479,12 @@ app.post('/partner-wtb', async (req, res) => {
     const embed = new EmbedBuilder()
       .setTitle('🔥 NEW WTB DEAL 🔥')
       .setDescription(
-        `**${productName}**\n${sku}\n${size}\n${brand}\n\n` +
-        `Click below to go to the WTB in our server and place your offer.`
+        `**${productName}**\n${sku}\n${size}\n${brand}`
       )
       .setColor(0xf1c40f)
       .addFields({
         name: 'Current Lowest Offer',
-        value: currentLowestDisplay,
+        value: `${currentLowestDisplay}\n\nClick below to go to the WTB in our server and place your offer.`,
         inline: false
       });
 
@@ -614,7 +609,6 @@ app.post('/payout-channel', async (req, res) => {
 });
 
 /* ---------------- NEW: POST /sync-lowest ---------------- */
-/* Called by Airtable Automation when Current Lowest Offer changes */
 
 app.post('/sync-lowest', async (req, res) => {
   try {
@@ -693,14 +687,13 @@ client.on(Events.InteractionCreate, async interaction => {
         orderRecord = recs[0] || null;
       } catch (_) {}
 
-      let lowest = null;
-      if (orderRecord?.id) {
-        lowest = await getCurrentLowest(orderRecord.id).catch(() => null);
-      }
-
       let offerPlaceholder = 'Enter your offer (e.g. 140)';
-      if (lowest) {
-        offerPlaceholder = `Current Lowest Offer: ${formatLowestForDisplay(lowest)}`;
+
+      if (orderRecord) {
+        const currentLowestRaw = orderRecord.get(ORDER_FIELD_CURRENT_LOWEST_OFFER);
+        if (currentLowestRaw) {
+          offerPlaceholder = `Current Lowest Offer: ${currentLowestRaw}`;
+        }
       }
 
       const modal = new ModalBuilder()
@@ -752,14 +745,13 @@ client.on(Events.InteractionCreate, async interaction => {
         orderRecord = recs[0] || null;
       } catch (_) {}
 
-      let lowest = null;
-      if (orderRecord?.id) {
-        lowest = await getCurrentLowest(orderRecord.id).catch(() => null);
-      }
-
       let offerPlaceholder = 'Enter your offer (e.g. 140)';
-      if (lowest) {
-        offerPlaceholder = `Current Lowest Offer: ${formatLowestForDisplay(lowest)}`;
+
+      if (orderRecord) {
+        const currentLowestRaw = orderRecord.get(ORDER_FIELD_CURRENT_LOWEST_OFFER);
+        if (currentLowestRaw) {
+          offerPlaceholder = `Current Lowest Offer: ${currentLowestRaw}`;
+        }
       }
 
       const modal = new ModalBuilder()
@@ -980,7 +972,7 @@ client.on(Events.InteractionCreate, async interaction => {
         ephemeral: true
       });
 
-      // Extra confirmation via DM with a "Go To WTB" button (no Airtable embed)
+      // Extra confirmation via DM with a "Go To WTB" button
       try {
         const dmRow = new ActionRowBuilder().addComponents(
           new ButtonBuilder()
