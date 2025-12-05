@@ -348,7 +348,7 @@ async function updateLowestOfferDisplays(orderId) {
 
         filteredFields.push({
           name: 'Current Lowest Offer',
-          value: `${currentLowestDisplay}\n\nClick below to go to the WTB in our server and place your offer.`,
+          value: `${currentLowestDisplay}\n\nClick the "Offer" button below to go to the WTB in our server and place your offer.`,
           inline: false
         });
 
@@ -484,7 +484,7 @@ app.post('/partner-wtb', async (req, res) => {
       .setColor(0xf1c40f)
       .addFields({
         name: 'Current Lowest Offer',
-        value: `${currentLowestDisplay}\n\nClick below to go to the WTB in our server and place your offer.`,
+        value: `${currentLowestDisplay}\n\nClick the "Offer" button below to go to the WTB in our server and place your offer.`,
         inline: false
       });
 
@@ -492,7 +492,7 @@ app.post('/partner-wtb', async (req, res) => {
 
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
-        .setLabel('Go To Server')
+        .setLabel('Offer')
         .setStyle(ButtonStyle.Link)
         .setURL(offerMessageUrl),
 
