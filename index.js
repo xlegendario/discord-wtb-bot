@@ -649,26 +649,63 @@ client.on(Events.InteractionCreate, async interaction => {
         return line ? line.replace(label, '').trim() : null;
       }
 
+      const payoutRaw = get('**Payout:**') || '';
+      const payoutNumber = parseFloat(payoutRaw.replace('€', '').replace(',', '.'));
+
       const payload = {
         orderId: get('**Order:**'),
         productName: get('**Product:**'),
         sku: get('**SKU:**'),
         size: get('**Size:**'),
         brand: get('**Brand:**'),
-        payout: parseFloat((get('**Payout:**') || '').replace('€','')),
+        payout: payoutNumber,
         sellerCode,
         discordUserId,
         vatType: get('**VAT Type:**') || null,
         imageUrl: embed.image?.url || null
       };
 
+      // Send to your processing webhook
       await fetch(PROCESS_DEAL_WEBHOOK_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
+      }).catch(() => null);
+
+      // Disable the button so it can't be clicked again
+      const disabledComponents = interaction.message.components.map(row =>
+        new ActionRowBuilder().addComponents(
+          ...row.components.map(comp => ButtonBuilder.from(comp).setDisabled(true))
+        )
+      );
+
+      await interaction.message.edit({ components: disabledComponents }).catch(() => null);
+
+      // Build the visible confirmation message in the channel
+      const finalPayout =
+        Number.isFinite(payload.payout) ? payload.payout : null;
+
+      const payoutLine = finalPayout !== null
+        ? `Final payout: €${finalPayout.toFixed(2)}`
+        : 'Final payout: see deal details above';
+
+      const infoMsg =
+        `✅ Deal processed!\n\n` +
+        `💶\n${payoutLine}\n\n` +
+        `⚠️\nBecause you are not a Trusted Seller yet, we had to deduct €10 from the payout for the extra label and handling.\n\n` +
+        `📦\nThe shipping label will be sent shortly.\n\n` +
+        `📬\nPlease prepare the package and ensure it is packed in a clean, unbranded box with no unnecessary stickers or markings. REMOVE ANY PRICETAGS!\n\n` +
+        `❌\nDo not include anything inside the box, as this is not a standard deal.\n\n` +
+        `📸\nPlease pack it as professionally as possible. If you\'re unsure, feel free to take a photo of the package and share it here before shipping.`;
+
+      await interaction.channel.send({
+        content: `<@${discordUserId}>\n\n${infoMsg}`
       });
 
-      return interaction.reply({ content: '✅ Deal sent to processing.', ephemeral: true });
+      return interaction.reply({
+        content: '✅ Deal processed and instructions sent in this channel.',
+        ephemeral: true
+      });
     }
 
     /* ---- RETRY OFFER BUTTON (in DM) ---- */
