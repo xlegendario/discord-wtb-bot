@@ -23,7 +23,7 @@ import {
 const {
   DISCORD_TOKEN,
   DISCORD_DEALS_CHANNEL_ID,
-  DISCORD_PARTNER_WTB_CHANNEL_ID,          // 👈 NEW: partner WTB channels
+  DISCORD_PARTNER_WTB_CHANNEL_ID,          // partner WTB channels
   AIRTABLE_API_KEY,
   AIRTABLE_BASE_ID,
   AIRTABLE_SELLER_OFFERS_TABLE,
@@ -43,15 +43,15 @@ const dealsChannelIds = DISCORD_DEALS_CHANNEL_ID.split(',')
   .map(id => id.trim())
   .filter(Boolean);
 
-// 👇 NEW: partner WTB channels (for “Go To Server” embeds)
+// partner WTB channels (for “Go To Server” embeds)
 const partnerWtbChannelIds = (DISCORD_PARTNER_WTB_CHANNEL_ID || '')
   .split(',')
   .map(id => id.trim())
   .filter(Boolean);
 
+// Airtable view URL for “See All WTB’s” button
 const WTB_URL =
   'https://airtable.com/invite/l?inviteId=invwmhpKlD6KmJe6n&inviteToken=a14697b7435e64f6ee429f8b59fbb07bc0474aaf66c8ff59068aa5ceb2842253&utm_medium=email&utm_source=product_team&utm_content=transactional-alerts';
-
 
 /* ---------------- Airtable ---------------- */
 
@@ -61,8 +61,10 @@ const sellerOffersTableName = AIRTABLE_SELLER_OFFERS_TABLE || 'Seller Offers';
 const sellersTableName      = AIRTABLE_SELLERS_TABLE       || 'Sellers Database';
 const ordersTableName       = AIRTABLE_ORDERS_TABLE        || 'Unfulfilled Orders Log';
 
-const ORDER_FIELD_SELLER_MSG_IDS   = 'Seller Offer Message ID';
-const ORDER_FIELD_BUTTONS_DISABLED = 'Seller Offer Buttons Disabled';
+const ORDER_FIELD_SELLER_MSG_IDS        = 'Seller Offer Message ID';
+const ORDER_FIELD_BUTTONS_DISABLED      = 'Seller Offer Buttons Disabled';
+const ORDER_FIELD_PARTNER_WTB_MSG_IDS   = 'Partner WTB Message IDs';     // NEW
+const ORDER_FIELD_CURRENT_LOWEST_OFFER  = 'Current Lowest Offer';        // Airtable field you trigger on
 
 /* ---------------- Utilities ---------------- */
 
@@ -148,7 +150,6 @@ async function safeDM(user, content) {
   }
 }
 
-
 /* ---------------- Discord ---------------- */
 
 const client = new Client({
@@ -168,25 +169,54 @@ async function disableSellerOfferMessages(orderId) {
   const order = await base(ordersTableName).find(orderId).catch(() => null);
   if (!order) return;
 
+  // ---- 1) Disable internal WTB buttons ----
   const rawIds = order.get(ORDER_FIELD_SELLER_MSG_IDS);
-  if (!rawIds) return;
+  if (rawIds) {
+    const msgIds = String(rawIds).split(',').map(x => x.trim()).filter(Boolean);
 
-  const msgIds = String(rawIds).split(',').map(x => x.trim()).filter(Boolean);
+    for (const channelId of dealsChannelIds) {
+      const channel = await client.channels.fetch(channelId).catch(() => null);
+      if (!channel) continue;
 
-  for (const channelId of dealsChannelIds) {
-    const channel = await client.channels.fetch(channelId).catch(() => null);
-    if (!channel) continue;
+      for (const id of msgIds) {
+        const msg = await channel.messages.fetch(id).catch(() => null);
+        if (!msg) continue;
 
-    for (const id of msgIds) {
-      const msg = await channel.messages.fetch(id).catch(() => null);
-      if (!msg) continue;
+        const disabled = msg.components.map(row =>
+          new ActionRowBuilder().addComponents(
+            ...row.components.map(btn => ButtonBuilder.from(btn).setDisabled(true))
+          )
+        );
 
-      const disabled = msg.components.map(row =>
-        new ActionRowBuilder().addComponents(
-          ...row.components.map(btn => ButtonBuilder.from(btn).setDisabled(true))
-        )
-      );
-      await msg.edit({ components: disabled });
+        await msg.edit({ components: disabled }).catch(() => null);
+      }
+    }
+  }
+
+  // ---- 2) Disable partner WTB buttons (Go To Server + See All WTB's) ----
+  const rawPartnerIds = order.get(ORDER_FIELD_PARTNER_WTB_MSG_IDS);
+  if (rawPartnerIds) {
+    const partnerMsgIds = String(rawPartnerIds)
+      .split(',')
+      .map(x => x.trim())
+      .filter(Boolean);
+
+    for (const channelId of partnerWtbChannelIds) {
+      const channel = await client.channels.fetch(channelId).catch(() => null);
+      if (!channel) continue;
+
+      for (const id of partnerMsgIds) {
+        const msg = await channel.messages.fetch(id).catch(() => null);
+        if (!msg) continue;
+
+        const disabled = msg.components.map(row =>
+          new ActionRowBuilder().addComponents(
+            ...row.components.map(btn => ButtonBuilder.from(btn).setDisabled(true))
+          )
+        );
+
+        await msg.edit({ components: disabled }).catch(() => null);
+      }
     }
   }
 
@@ -195,7 +225,8 @@ async function disableSellerOfferMessages(orderId) {
     .catch(() => null);
 }
 
-/* ---------------- Lowest offer calculation ---------------- */
+
+/* ---------------- Lowest offer calculation (for logic / placeholder) ---------------- */
 
 async function getCurrentLowest(orderId) {
   if (!orderId) return null;
@@ -208,7 +239,7 @@ async function getCurrentLowest(orderId) {
     const links = rec.get('Linked Orders');
     if (!Array.isArray(links)) continue;
 
-    const matches = links.some(l => typeof l === 'string' ? l === orderId : l?.id === orderId);
+    const matches = links.some(l => (typeof l === 'string' ? l === orderId : l?.id === orderId));
     if (!matches) continue;
 
     const price = parseNumeric(rec.get('Seller Offer'));
@@ -226,7 +257,7 @@ async function getCurrentLowest(orderId) {
 
   if (best) return best;
 
-  // 🔹 Fallback: if there are no offers yet, use order's Maximum Buying Price as baseline
+  // Fallback: if there are no offers yet, use order's Maximum Buying Price as baseline
   const order = await base(ordersTableName).find(orderId).catch(() => null);
   if (!order) return null;
 
@@ -240,6 +271,99 @@ async function getCurrentLowest(orderId) {
   };
 }
 
+/* ---------------- Update "Current Lowest Offer" on embeds ---------------- */
+
+async function updateLowestOfferDisplays(orderId) {
+  if (!orderId) return;
+
+  const order = await base(ordersTableName).find(orderId).catch(() => null);
+  if (!order) return;
+
+  // Read the CURRENT LOWEST OFFER TEXT from Airtable
+  const currentLowestRaw = order.get(ORDER_FIELD_CURRENT_LOWEST_OFFER);
+  const currentLowestDisplay = currentLowestRaw ? String(currentLowestRaw) : 'No offers yet';
+
+  // ---- 1) Update internal WTB embeds in your own server ----
+  const rawInternalIds = order.get(ORDER_FIELD_SELLER_MSG_IDS);
+  if (rawInternalIds) {
+    const msgIds = String(rawInternalIds)
+      .split(',')
+      .map(x => x.trim())
+      .filter(Boolean);
+
+    for (const channelId of dealsChannelIds) {
+      const channel = await client.channels.fetch(channelId).catch(() => null);
+      if (!channel) continue;
+
+      for (const id of msgIds) {
+        const msg = await channel.messages.fetch(id).catch(() => null);
+        if (!msg || !msg.embeds?.length) continue;
+
+        const oldEmbed = msg.embeds[0];
+        const newEmbed = EmbedBuilder.from(oldEmbed);
+
+        const existingFields = Array.isArray(newEmbed.data?.fields)
+          ? newEmbed.data.fields
+          : [];
+
+        const filteredFields = existingFields.filter(
+          f => f.name !== 'Current Lowest Offer'
+        );
+
+        filteredFields.push({
+          name: 'Current Lowest Offer',
+          value: currentLowestDisplay,
+          inline: false
+        });
+
+        newEmbed.setFields(filteredFields);
+
+        await msg.edit({ embeds: [newEmbed] }).catch(() => null);
+      }
+    }
+  }
+
+  // ---- 2) Update partner WTB embeds in partner servers ----
+  const rawPartnerIds = order.get(ORDER_FIELD_PARTNER_WTB_MSG_IDS);
+  if (rawPartnerIds) {
+    const partnerMsgIds = String(rawPartnerIds)
+      .split(',')
+      .map(x => x.trim())
+      .filter(Boolean);
+
+    for (const channelId of partnerWtbChannelIds) {
+      const channel = await client.channels.fetch(channelId).catch(() => null);
+      if (!channel) continue;
+
+      for (const id of partnerMsgIds) {
+        const msg = await channel.messages.fetch(id).catch(() => null);
+        if (!msg || !msg.embeds?.length) continue;
+
+        const oldEmbed = msg.embeds[0];
+        const newEmbed = EmbedBuilder.from(oldEmbed);
+
+        const existingFields = Array.isArray(newEmbed.data?.fields)
+          ? newEmbed.data.fields
+          : [];
+
+        const filteredFields = existingFields.filter(
+          f => f.name !== 'Current Lowest Offer'
+        );
+
+        filteredFields.push({
+          name: 'Current Lowest Offer',
+          value: currentLowestDisplay,
+          inline: false
+        });
+
+        newEmbed.setFields(filteredFields);
+
+        await msg.edit({ embeds: [newEmbed] }).catch(() => null);
+      }
+    }
+  }
+}
+
 /* ---------------- Express API ---------------- */
 
 const app = express();
@@ -249,18 +373,33 @@ app.use(express.json({ limit: '2mb' }));
 app.get('/', (_req, res) => res.send('WTB Seller Offers Bot OK'));
 
 /* ---------------- POST /partner-offer-deal ---------------- */
-/* (your internal WTB in your own server – unchanged) */
+/* (your internal WTB in your own server) */
 
 async function sendOfferDeal(req, res) {
   try {
     const { productName, sku, size, brand, imageUrl, recordId } = req.body || {};
+
+    // Read current lowest from the order (for initial embed)
+    let currentLowestDisplay = 'No offers yet';
+    if (recordId) {
+      const order = await base(ordersTableName).find(recordId).catch(() => null);
+      if (order) {
+        const rawLowest = order.get(ORDER_FIELD_CURRENT_LOWEST_OFFER);
+        if (rawLowest) currentLowestDisplay = String(rawLowest);
+      }
+    }
 
     const embed = new EmbedBuilder()
       .setTitle('🔥 NEW WTB DEAL 🔥')
       .setDescription(
         `**${productName}**\n${sku}\n${size}\n${brand}\n\nClick below to submit your offer.`
       )
-      .setColor(0xf1c40f);
+      .setColor(0xf1c40f)
+      .addFields({
+        name: 'Current Lowest Offer',
+        value: currentLowestDisplay,
+        inline: false
+      });
 
     if (imageUrl) embed.setImage(imageUrl);
 
@@ -271,16 +410,21 @@ async function sendOfferDeal(req, res) {
       const channel = await client.channels.fetch(channelId).catch(() => null);
       if (!channel) continue;
 
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId('seller_offer')
+          .setLabel('Offer')
+          .setStyle(ButtonStyle.Success),
+
+        new ButtonBuilder()
+          .setLabel("See All WTB's")
+          .setStyle(ButtonStyle.Link)
+          .setURL(WTB_URL)
+      );
+
       const msg = await channel.send({
         embeds: [embed],
-        components: [
-          new ActionRowBuilder().addComponents(
-            new ButtonBuilder()
-              .setCustomId('seller_offer')
-              .setLabel('Offer')
-              .setStyle(ButtonStyle.Success)
-          )
-        ]
+        components: [row]
       });
 
       messageIds.push(msg.id);
@@ -311,7 +455,7 @@ async function sendOfferDeal(req, res) {
 app.post('/partner-offer-deal', sendOfferDeal);
 app.post('/partner-deal', sendOfferDeal);
 
-/* ---------------- NEW: POST /partner-wtb ---------------- */
+/* ---------------- POST /partner-wtb ---------------- */
 /* Sends WTB embed into partner servers with "Go To Server" link button */
 
 app.post('/partner-wtb', async (req, res) => {
@@ -322,7 +466,7 @@ app.post('/partner-wtb', async (req, res) => {
       return res.status(400).json({ error: 'recordId is required' });
     }
 
-    // Get Offer Message URL from Airtable
+    // Get Order from Airtable
     const order = await base(ordersTableName).find(recordId).catch(() => null);
     if (!order) {
       return res.status(404).json({ error: 'Order not found in Airtable' });
@@ -333,21 +477,34 @@ app.post('/partner-wtb', async (req, res) => {
       return res.status(400).json({ error: 'Offer Message URL is empty for this order' });
     }
 
+    const currentLowestRaw = order.get(ORDER_FIELD_CURRENT_LOWEST_OFFER);
+    const currentLowestDisplay = currentLowestRaw ? String(currentLowestRaw) : 'No offers yet';
+
     const embed = new EmbedBuilder()
       .setTitle('🔥 NEW WTB DEAL 🔥')
       .setDescription(
         `**${productName}**\n${sku}\n${size}\n${brand}\n\n` +
         `Click below to go to the WTB in our server and place your offer.`
       )
-      .setColor(0xf1c40f);
+      .setColor(0xf1c40f)
+      .addFields({
+        name: 'Current Lowest Offer',
+        value: currentLowestDisplay,
+        inline: false
+      });
 
     if (imageUrl) embed.setImage(imageUrl);
 
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
         .setLabel('Go To Server')
-        .setStyle(ButtonStyle.Link)   // link button → no interaction handler needed
-        .setURL(offerMessageUrl)
+        .setStyle(ButtonStyle.Link)
+        .setURL(offerMessageUrl),
+
+      new ButtonBuilder()
+        .setLabel("See All WTB's")
+        .setStyle(ButtonStyle.Link)
+        .setURL(WTB_URL)
     );
 
     const sentIds = [];
@@ -363,6 +520,11 @@ app.post('/partner-wtb', async (req, res) => {
 
       sentIds.push(msg.id);
     }
+
+    // Save partner WTB message IDs to the order
+    await base(ordersTableName).update(recordId, {
+      [ORDER_FIELD_PARTNER_WTB_MSG_IDS]: sentIds.join(',')
+    });
 
     return res.json({ ok: true, messageIds: sentIds });
   } catch (err) {
@@ -382,7 +544,6 @@ app.post('/seller-offer/disable', async (req, res) => {
 });
 
 /* ---------------- POST /payout-channel ---------------- */
-
 
 app.post('/payout-channel', async (req, res) => {
   try {
@@ -452,6 +613,25 @@ app.post('/payout-channel', async (req, res) => {
   }
 });
 
+/* ---------------- NEW: POST /sync-lowest ---------------- */
+/* Called by Airtable Automation when Current Lowest Offer changes */
+
+app.post('/sync-lowest', async (req, res) => {
+  try {
+    const { orderId } = req.body || {};
+    if (!orderId) {
+      return res.status(400).json({ error: 'Missing orderId' });
+    }
+
+    await updateLowestOfferDisplays(orderId);
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('Error in /sync-lowest:', err);
+    return res.status(500).json({ error: 'Internal error' });
+  }
+});
+
 /* ---------------- Discord Interaction Logic ---------------- */
 
 client.on(Events.InteractionCreate, async interaction => {
@@ -500,7 +680,6 @@ client.on(Events.InteractionCreate, async interaction => {
     /* ---- RETRY OFFER BUTTON (in DM) ---- */
     if (interaction.isButton() && interaction.customId.startsWith('retry_offer:')) {
       const [, guildId, channelId, messageId] = interaction.customId.split(':');
-      // We only really need messageId; guildId/channelId are just for traceability
 
       // Find order for placeholder
       let orderRecord = null;
@@ -731,7 +910,6 @@ client.on(Events.InteractionCreate, async interaction => {
               altDisplay = ` / ≈€${equivVat0.toFixed(2)} (VAT0)`;
             }
 
-
             const msg =
               `❌ Offer too high.\n` +
               `Current lowest: **${lowestStr}**\n` +
@@ -807,7 +985,7 @@ client.on(Events.InteractionCreate, async interaction => {
         const dmRow = new ActionRowBuilder().addComponents(
           new ButtonBuilder()
             .setLabel('Go To WTB')
-            .setStyle(ButtonStyle.Link) // link-style button → no preview
+            .setStyle(ButtonStyle.Link)
             .setURL(WTB_URL)
         );
 
