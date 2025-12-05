@@ -692,7 +692,6 @@ client.on(Events.InteractionCreate, async interaction => {
       const infoMsg =
         `✅ Deal processed!\n\n` +
         `💶\n${payoutLine}\n\n` +
-        `⚠️\nBecause you are not a Trusted Seller yet, we had to deduct €10 from the payout for the extra label and handling.\n\n` +
         `📦\nThe shipping label will be sent shortly.\n\n` +
         `📬\nPlease prepare the package and ensure it is packed in a clean, unbranded box with no unnecessary stickers or markings. REMOVE ANY PRICETAGS!\n\n` +
         `❌\nDo not include anything inside the box, as this is not a standard deal.\n\n` +
