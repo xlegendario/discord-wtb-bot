@@ -23,12 +23,12 @@ import {
 const {
   DISCORD_TOKEN,
   DISCORD_DEALS_CHANNEL_ID,
-  DISCORD_PARTNER_WTB_CHANNEL_ID,          // partner WTB channels
   AIRTABLE_API_KEY,
   AIRTABLE_BASE_ID,
   AIRTABLE_SELLER_OFFERS_TABLE,
   AIRTABLE_SELLERS_TABLE,
   AIRTABLE_ORDERS_TABLE,
+  AIRTABLE_PARTNERS_TABLE,
   PAYOUT_CATEGORY_ID,
   PROCESS_DEAL_WEBHOOK_URL,
   PORT = 10000
@@ -43,12 +43,6 @@ const dealsChannelIds = DISCORD_DEALS_CHANNEL_ID.split(',')
   .map(id => id.trim())
   .filter(Boolean);
 
-// partner WTB channels (for “Go To Server” embeds)
-const partnerWtbChannelIds = (DISCORD_PARTNER_WTB_CHANNEL_ID || '')
-  .split(',')
-  .map(id => id.trim())
-  .filter(Boolean);
-
 // Airtable view URL for “See All WTB’s” button
 const WTB_URL =
   'https://airtable.com/invite/l?inviteId=invwmhpKlD6KmJe6n&inviteToken=a14697b7435e64f6ee429f8b59fbb07bc0474aaf66c8ff59068aa5ceb2842253&utm_medium=email&utm_source=product_team&utm_content=transactional-alerts';
@@ -60,17 +54,22 @@ const base = new Airtable({ apiKey: AIRTABLE_API_KEY }).base(AIRTABLE_BASE_ID);
 const sellerOffersTableName = AIRTABLE_SELLER_OFFERS_TABLE || 'Seller Offers';
 const sellersTableName      = AIRTABLE_SELLERS_TABLE       || 'Sellers Database';
 const ordersTableName       = AIRTABLE_ORDERS_TABLE        || 'Unfulfilled Orders Log';
+const partnersTableName     = AIRTABLE_PARTNERS_TABLE      || 'Partnerships';
 
 const ORDER_FIELD_SELLER_MSG_IDS        = 'Seller Offer Message ID';
 const ORDER_FIELD_BUTTONS_DISABLED      = 'Seller Offer Buttons Disabled';
-const ORDER_FIELD_PARTNER_WTB_MSG_IDS   = 'Partner WTB Message IDs';
+const ORDER_FIELD_PARTNER_WTB_MSG_IDS   = 'Partner WTB Message IDs';   // still available if you ever want to use it
 const ORDER_FIELD_CURRENT_LOWEST_OFFER  = 'Current Lowest Offer';
+
+const PARTNER_FIELD_WEBHOOK_URL         = 'WTB Webhook URL';
+const PARTNER_FIELD_ACTIVE              = 'Active?';
+const PARTNER_FIELD_WTB_MESSAGES        = 'Partner WTB Messages';
 
 /* ---------------- Utilities ---------------- */
 
 const MIN_UNDERCUT_STEP = 2.5;
 
-function normalizeVatType(raw) {
+function normalizeVatType(raw: any) {
   if (!raw) return null;
   if (raw === 'Margin') return 'Margin';
   if (raw === 'VAT0')   return 'VAT0';
@@ -78,7 +77,7 @@ function normalizeVatType(raw) {
   return null;
 }
 
-function parseNumeric(value) {
+function parseNumeric(value: any): number | null {
   if (typeof value === 'number') return value;
   if (typeof value === 'string') {
     const n = parseFloat(value.replace(',', '.').replace(/[^\d.-]/g, ''));
@@ -92,22 +91,21 @@ function parseNumeric(value) {
  * - VAT0 → *1.21
  * - Margin/VAT21 → as-is (treated as gross)
  */
-function getNormalized(price, vatType) {
+function getNormalized(price: number, vatType: string | null) {
   if (!Number.isFinite(price)) return null;
   if (vatType === 'VAT0') return price * 1.21;
   return price;
 }
 
 /**
- * Pretty display using VAT logic (still used for undercut messaging).
+ * Format lowest offer incl. VAT conversions
+ * (used in the undercut error messaging).
  */
-function formatLowestForDisplay(lowest) {
+function formatLowestForDisplay(lowest: { raw: number; vatType: string | null }) {
   if (!lowest || typeof lowest.raw !== 'number') return 'N/A';
 
   let displayType = lowest.vatType;
-  if (lowest.vatType === 'VAT21') {
-    displayType = 'Margin';
-  }
+  if (lowest.vatType === 'VAT21') displayType = 'Margin';
 
   const base = `€${lowest.raw.toFixed(2)}${displayType ? ` (${displayType})` : ''}`;
 
@@ -117,34 +115,30 @@ function formatLowestForDisplay(lowest) {
   }
 
   if (lowest.vatType === 'VAT0') {
-    const asVat21 = lowest.raw * 1.21;
-    return `${base} / €${asVat21.toFixed(2)} (Margin)`;
+    const asMargin = lowest.raw * 1.21;
+    return `${base} / €${asMargin.toFixed(2)} (Margin)`;
   }
 
   return base;
 }
 
 // Safe DM helper with "Retry Offer" button
-async function safeDMWithRetry(user, content, retryCustomId) {
+async function safeDMWithRetry(user: any, content: string, retryCustomId: string | null) {
   try {
-    const row = new ActionRowBuilder().addComponents(
+    if (!retryCustomId) {
+      await user.send({ content });
+      return;
+    }
+
+    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder()
         .setCustomId(retryCustomId)
         .setLabel('Retry Offer')
         .setStyle(ButtonStyle.Primary)
     );
     await user.send({ content, components: [row] });
-  } catch (e) {
+  } catch (e: any) {
     console.warn('DM failed:', e.message);
-  }
-}
-
-// Simple DM helper
-async function safeDM(user, content) {
-  try {
-    await user.send({ content });
-  } catch (e) {
-    console.warn('DM confirm failed:', e.message);
   }
 }
 
@@ -161,55 +155,75 @@ client.once(Events.ClientReady, c => {
 
 client.login(DISCORD_TOKEN);
 
-/* ---------------- Disable messages ---------------- */
+/* ---------------- Lowest offer calculation (for logic / placeholder in errors etc.) ---------------- */
 
-async function disableSellerOfferMessages(orderId) {
+async function getCurrentLowest(orderId: string | null) {
+  if (!orderId) return null;
+
+  const offers = await base(sellerOffersTableName).select().all();
+
+  let best: { normalized: number; raw: number; vatType: string | null } | null = null;
+
+  for (const rec of offers) {
+    const links = rec.get('Linked Orders') as any;
+    if (!Array.isArray(links)) continue;
+
+    const matches = links.some((l: any) =>
+      typeof l === 'string' ? l === orderId : l?.id === orderId
+    );
+    if (!matches) continue;
+
+    const price = parseNumeric(rec.get('Seller Offer'));
+    const vatRaw = rec.get('Offer VAT Type') as any;
+    const vat = typeof vatRaw === 'string' ? vatRaw : vatRaw?.name;
+    const vatNorm = normalizeVatType(vat);
+    if (!price) continue;
+
+    const normalized = getNormalized(price, vatNorm);
+    if (!Number.isFinite(normalized!)) continue;
+
+    if (!best || (normalized as number) < best.normalized) {
+      best = { normalized: normalized as number, raw: price, vatType: vatNorm };
+    }
+  }
+
+  if (best) return best;
+
+  // Fallback: if there are no offers yet, use order's Maximum Buying Price as baseline
+  const order = await base(ordersTableName).find(orderId).catch(() => null);
+  if (!order) return null;
+
+  const maxPrice = parseNumeric(order.get('Maximum Buying Price'));
+  if (!Number.isFinite(maxPrice!)) return null;
+
+  return {
+    normalized: maxPrice as number,
+    raw: maxPrice as number,
+    vatType: 'Margin'
+  };
+}
+
+/* ---------------- Disable messages (only in your own server) ---------------- */
+
+async function disableSellerOfferMessages(orderId: string) {
   const order = await base(ordersTableName).find(orderId).catch(() => null);
   if (!order) return;
 
-  // ---- 1) Disable internal WTB buttons ----
   const rawIds = order.get(ORDER_FIELD_SELLER_MSG_IDS);
   if (rawIds) {
     const msgIds = String(rawIds).split(',').map(x => x.trim()).filter(Boolean);
 
     for (const channelId of dealsChannelIds) {
-      const channel = await client.channels.fetch(channelId).catch(() => null);
+      const channel: any = await client.channels.fetch(channelId).catch(() => null);
       if (!channel) continue;
 
       for (const id of msgIds) {
         const msg = await channel.messages.fetch(id).catch(() => null);
         if (!msg) continue;
 
-        const disabled = msg.components.map(row =>
-          new ActionRowBuilder().addComponents(
-            ...row.components.map(btn => ButtonBuilder.from(btn).setDisabled(true))
-          )
-        );
-
-        await msg.edit({ components: disabled }).catch(() => null);
-      }
-    }
-  }
-
-  // ---- 2) Disable partner WTB buttons (Go To Server + See All WTB's) ----
-  const rawPartnerIds = order.get(ORDER_FIELD_PARTNER_WTB_MSG_IDS);
-  if (rawPartnerIds) {
-    const partnerMsgIds = String(rawPartnerIds)
-      .split(',')
-      .map(x => x.trim())
-      .filter(Boolean);
-
-    for (const channelId of partnerWtbChannelIds) {
-      const channel = await client.channels.fetch(channelId).catch(() => null);
-      if (!channel) continue;
-
-      for (const id of partnerMsgIds) {
-        const msg = await channel.messages.fetch(id).catch(() => null);
-        if (!msg) continue;
-
-        const disabled = msg.components.map(row =>
-          new ActionRowBuilder().addComponents(
-            ...row.components.map(btn => ButtonBuilder.from(btn).setDisabled(true))
+        const disabled = msg.components.map((row: any) =>
+          new ActionRowBuilder<ButtonBuilder>().addComponents(
+            ...row.components.map((btn: any) => ButtonBuilder.from(btn).setDisabled(true))
           )
         );
 
@@ -223,54 +237,9 @@ async function disableSellerOfferMessages(orderId) {
     .catch(() => null);
 }
 
-/* ---------------- Lowest offer calculation (for logic / placeholder in errors etc.) ---------------- */
+/* ---------------- Update "Current Lowest Offer" (your own WTB messages) ---------------- */
 
-async function getCurrentLowest(orderId) {
-  if (!orderId) return null;
-
-  const offers = await base(sellerOffersTableName).select().all();
-
-  let best = null;
-
-  for (const rec of offers) {
-    const links = rec.get('Linked Orders');
-    if (!Array.isArray(links)) continue;
-
-    const matches = links.some(l => (typeof l === 'string' ? l === orderId : l?.id === orderId));
-    if (!matches) continue;
-
-    const price = parseNumeric(rec.get('Seller Offer'));
-    const vatRaw = rec.get('Offer VAT Type');
-    const vat = typeof vatRaw === 'string' ? vatRaw : vatRaw?.name;
-    const vatNorm = normalizeVatType(vat);
-    const normalized = getNormalized(price, vatNorm);
-
-    if (!Number.isFinite(normalized)) continue;
-
-    if (!best || normalized < best.normalized) {
-      best = { normalized, raw: price, vatType: vatNorm };
-    }
-  }
-
-  if (best) return best;
-
-  // Fallback: if there are no offers yet, use order's Maximum Buying Price as baseline
-  const order = await base(ordersTableName).find(orderId).catch(() => null);
-  if (!order) return null;
-
-  const maxPrice = parseNumeric(order.get('Maximum Buying Price'));
-  if (!Number.isFinite(maxPrice)) return null;
-
-  return {
-    normalized: maxPrice,
-    raw: maxPrice,
-    vatType: 'Margin'
-  };
-}
-
-/* ---------------- Update "Current Lowest Offer" on embeds ---------------- */
-
-async function updateLowestOfferDisplays(orderId) {
+async function updateLowestOfferDisplays(orderId: string) {
   if (!orderId) return;
 
   const order = await base(ordersTableName).find(orderId).catch(() => null);
@@ -279,85 +248,69 @@ async function updateLowestOfferDisplays(orderId) {
   const currentLowestRaw = order.get(ORDER_FIELD_CURRENT_LOWEST_OFFER);
   const currentLowestDisplay = currentLowestRaw ? String(currentLowestRaw) : 'No offers yet';
 
-  // ---- 1) Update internal WTB embeds in your own server ----
   const rawInternalIds = order.get(ORDER_FIELD_SELLER_MSG_IDS);
-  if (rawInternalIds) {
-    const msgIds = String(rawInternalIds)
-      .split(',')
-      .map(x => x.trim())
-      .filter(Boolean);
+  if (!rawInternalIds) return;
 
-    for (const channelId of dealsChannelIds) {
-      const channel = await client.channels.fetch(channelId).catch(() => null);
-      if (!channel) continue;
+  const msgIds = String(rawInternalIds)
+    .split(',')
+    .map(x => x.trim())
+    .filter(Boolean);
 
-      for (const id of msgIds) {
-        const msg = await channel.messages.fetch(id).catch(() => null);
-        if (!msg || !msg.embeds?.length) continue;
+  for (const channelId of dealsChannelIds) {
+    const channel: any = await client.channels.fetch(channelId).catch(() => null);
+    if (!channel) continue;
 
-        const oldEmbed = msg.embeds[0];
-        const newEmbed = EmbedBuilder.from(oldEmbed);
+    for (const id of msgIds) {
+      const msg = await channel.messages.fetch(id).catch(() => null);
+      if (!msg || !msg.embeds?.length) continue;
 
-        const existingFields = Array.isArray(newEmbed.data?.fields)
-          ? newEmbed.data.fields
-          : [];
+      const oldEmbed = msg.embeds[0];
+      const newEmbed = EmbedBuilder.from(oldEmbed);
 
-        const filteredFields = existingFields.filter(
-          f => f.name !== 'Current Lowest Offer'
-        );
+      const existingFields = Array.isArray(newEmbed.data?.fields)
+        ? newEmbed.data.fields
+        : [];
 
-        filteredFields.push({
-          name: 'Current Lowest Offer',
-          value: `${currentLowestDisplay}\n\nClick below to submit your offer.`,
-          inline: false
-        });
+      const filteredFields = existingFields.filter(
+        (f: any) => f.name !== 'Current Lowest Offer'
+      );
 
-        newEmbed.setFields(filteredFields);
+      filteredFields.push({
+        name: 'Current Lowest Offer',
+        value: `${currentLowestDisplay}\n\nClick below to submit your offer.`,
+        inline: false
+      });
 
-        await msg.edit({ embeds: [newEmbed] }).catch(() => null);
-      }
+      newEmbed.setFields(filteredFields);
+
+      await msg.edit({ embeds: [newEmbed] }).catch(() => null);
     }
   }
+}
 
-  // ---- 2) Update partner WTB embeds in partner servers ----
-  const rawPartnerIds = order.get(ORDER_FIELD_PARTNER_WTB_MSG_IDS);
-  if (rawPartnerIds) {
-    const partnerMsgIds = String(rawPartnerIds)
-      .split(',')
-      .map(x => x.trim())
-      .filter(Boolean);
+/* ---------------- Helper: get active partners ---------------- */
 
-    for (const channelId of partnerWtbChannelIds) {
-      const channel = await client.channels.fetch(channelId).catch(() => null);
-      if (!channel) continue;
+async function getActivePartners() {
+  const records = await base(partnersTableName)
+    .select({
+      filterByFormula: `AND({${PARTNER_FIELD_ACTIVE}}, {${PARTNER_FIELD_WEBHOOK_URL}} != '')`
+    })
+    .all();
 
-      for (const id of partnerMsgIds) {
-        const msg = await channel.messages.fetch(id).catch(() => null);
-        if (!msg || !msg.embeds?.length) continue;
+  return records.map(rec => ({
+    id: rec.id,
+    name: rec.get('Name') as string,
+    webhookUrl: rec.get(PARTNER_FIELD_WEBHOOK_URL) as string,
+    messagesLog: (rec.get(PARTNER_FIELD_WTB_MESSAGES) as string) || ''
+  }));
+}
 
-        const oldEmbed = msg.embeds[0];
-        const newEmbed = EmbedBuilder.from(oldEmbed);
+/* ---------------- Helper: parse Discord webhook URL ---------------- */
 
-        const existingFields = Array.isArray(newEmbed.data?.fields)
-          ? newEmbed.data.fields
-          : [];
-
-        const filteredFields = existingFields.filter(
-          f => f.name !== 'Current Lowest Offer'
-        );
-
-        filteredFields.push({
-          name: 'Current Lowest Offer',
-          value: `${currentLowestDisplay}\n\nClick the "Offer" button below to go to the WTB in our server and place your offer.`,
-          inline: false
-        });
-
-        newEmbed.setFields(filteredFields);
-
-        await msg.edit({ embeds: [newEmbed] }).catch(() => null);
-      }
-    }
-  }
+function parseWebhookUrl(url: string) {
+  const m = url.match(/https:\/\/discord\.com\/api\/webhooks\/([^/]+)\/([^/?]+)/);
+  if (!m) return null;
+  return { webhookId: m[1], webhookToken: m[2] };
 }
 
 /* ---------------- Express API ---------------- */
@@ -371,9 +324,9 @@ app.get('/', (_req, res) => res.send('WTB Seller Offers Bot OK'));
 /* ---------------- POST /partner-offer-deal ---------------- */
 /* (your internal WTB in your own server) */
 
-async function sendOfferDeal(req, res) {
+async function sendOfferDeal(req: express.Request, res: express.Response) {
   try {
-    const { productName, sku, size, brand, imageUrl, recordId } = req.body || {};
+    const { productName, sku, size, brand, imageUrl, recordId } = (req.body || {}) as any;
 
     // Read current lowest from the order (for initial embed)
     let currentLowestDisplay = 'No offers yet';
@@ -399,14 +352,14 @@ async function sendOfferDeal(req, res) {
 
     if (imageUrl) embed.setImage(imageUrl);
 
-    const messageIds = [];
-    const messageUrls = [];
+    const messageIds: string[] = [];
+    const messageUrls: string[] = [];
 
     for (const channelId of dealsChannelIds) {
-      const channel = await client.channels.fetch(channelId).catch(() => null);
+      const channel: any = await client.channels.fetch(channelId).catch(() => null);
       if (!channel) continue;
 
-      const row = new ActionRowBuilder().addComponents(
+      const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder()
           .setCustomId('seller_offer')
           .setLabel('Offer')
@@ -428,12 +381,11 @@ async function sendOfferDeal(req, res) {
     }
 
     if (recordId) {
-      const updateFields = {
+      const updateFields: any = {
         [ORDER_FIELD_SELLER_MSG_IDS]: messageIds.join(','),
         [ORDER_FIELD_BUTTONS_DISABLED]: false
       };
 
-      // Save first message URL as "Offer Message URL"
       if (messageUrls.length > 0) {
         updateFields['Offer Message URL'] = messageUrls[0];
       }
@@ -452,23 +404,22 @@ app.post('/partner-offer-deal', sendOfferDeal);
 app.post('/partner-deal', sendOfferDeal);
 
 /* ---------------- POST /partner-wtb ---------------- */
-/* Sends WTB embed into partner servers with "Go To Server" link button */
+/* Sends WTB embed into partner servers via webhooks */
 
 app.post('/partner-wtb', async (req, res) => {
   try {
-    const { productName, sku, size, brand, imageUrl, recordId } = req.body || {};
+    const { productName, sku, size, brand, imageUrl, recordId } = (req.body || {}) as any;
 
     if (!recordId) {
       return res.status(400).json({ error: 'recordId is required' });
     }
 
-    // Get Order from Airtable
     const order = await base(ordersTableName).find(recordId).catch(() => null);
     if (!order) {
       return res.status(404).json({ error: 'Order not found in Airtable' });
     }
 
-    const offerMessageUrl = order.get('Offer Message URL');
+    const offerMessageUrl = order.get('Offer Message URL') as string;
     if (!offerMessageUrl) {
       return res.status(400).json({ error: 'Offer Message URL is empty for this order' });
     }
@@ -476,52 +427,90 @@ app.post('/partner-wtb', async (req, res) => {
     const currentLowestRaw = order.get(ORDER_FIELD_CURRENT_LOWEST_OFFER);
     const currentLowestDisplay = currentLowestRaw ? String(currentLowestRaw) : 'No offers yet';
 
-    const embed = new EmbedBuilder()
-      .setTitle('🔥 NEW WTB DEAL 🔥')
-      .setDescription(
-        `**${productName}**\n${sku}\n${size}\n${brand}`
-      )
-      .setColor(0xf1c40f)
-      .addFields({
-        name: 'Current Lowest Offer',
-        value: `${currentLowestDisplay}\n\nClick the "Offer" button below to go to the WTB in our server and place your offer.`,
-        inline: false
-      });
-
-    if (imageUrl) embed.setImage(imageUrl);
-
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setLabel('Offer')
-        .setStyle(ButtonStyle.Link)
-        .setURL(offerMessageUrl),
-
-      new ButtonBuilder()
-        .setLabel("See All WTB's")
-        .setStyle(ButtonStyle.Link)
-        .setURL(WTB_URL)
-    );
-
-    const sentIds = [];
-
-    for (const channelId of partnerWtbChannelIds) {
-      const channel = await client.channels.fetch(channelId).catch(() => null);
-      if (!channel) continue;
-
-      const msg = await channel.send({
-        embeds: [embed],
-        components: [row]
-      });
-
-      sentIds.push(msg.id);
+    const partners = await getActivePartners();
+    if (!partners.length) {
+      return res.json({ ok: true, message: 'No active partners found' });
     }
 
-    // Save partner WTB message IDs to the order
-    await base(ordersTableName).update(recordId, {
-      [ORDER_FIELD_PARTNER_WTB_MSG_IDS]: sentIds.join(',')
-    });
+    const sentByPartner: { partnerId: string; messageId: string }[] = [];
 
-    return res.json({ ok: true, messageIds: sentIds });
+    for (const partner of partners) {
+      const webhookInfo = parseWebhookUrl(partner.webhookUrl);
+      if (!webhookInfo) {
+        console.warn(`Invalid webhook URL for partner ${partner.name}: ${partner.webhookUrl}`);
+        continue;
+      }
+
+      const payload: any = {
+        embeds: [
+          {
+            title: '🔥 NEW WTB DEAL 🔥',
+            description: `**${productName}**\n${sku}\n${size}\n${brand}`,
+            color: 0xf1c40f,
+            fields: [
+              {
+                name: 'Current Lowest Offer',
+                value:
+                  `${currentLowestDisplay}\n\n` +
+                  `Click the "Offer" button below to go to the WTB in our server and place your offer.`,
+                inline: false
+              }
+            ],
+            ...(imageUrl ? { image: { url: imageUrl } } : {})
+          }
+        ],
+        components: [
+          {
+            type: 1,
+            components: [
+              {
+                type: 2,
+                style: 5, // Link button
+                label: 'Offer',
+                url: offerMessageUrl
+              },
+              {
+                type: 2,
+                style: 5,
+                label: "See All WTB's",
+                url: WTB_URL
+              }
+            ]
+          }
+        ]
+      };
+
+      const resp = await fetch(`${partner.webhookUrl}?wait=true`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      }).catch(err => {
+        console.error('Error sending partner webhook:', err);
+        return null;
+      });
+
+      if (!resp || !resp.ok) {
+        console.warn(`Failed sending WTB to partner ${partner.name}`);
+        continue;
+      }
+
+      const data: any = await resp.json();
+      const messageId = data.id;
+      if (messageId) {
+        sentByPartner.push({ partnerId: partner.id, messageId });
+
+        // Log in Partnerships table: orderId:messageId
+        const prevLog = partner.messagesLog || '';
+        const newLine = `${recordId}:${messageId}`;
+        const updatedLog = prevLog ? `${prevLog}\n${newLine}` : newLine;
+
+        await base(partnersTableName).update(partner.id, {
+          [PARTNER_FIELD_WTB_MESSAGES]: updatedLog
+        }).catch(() => null);
+      }
+    }
+
+    return res.json({ ok: true, sent: sentByPartner });
   } catch (err) {
     console.error('Error in /partner-wtb:', err);
     return res.status(500).json({ error: 'Internal error' });
@@ -531,7 +520,7 @@ app.post('/partner-wtb', async (req, res) => {
 /* ---------------- POST /seller-offer/disable ---------------- */
 
 app.post('/seller-offer/disable', async (req, res) => {
-  const { recordId } = req.body;
+  const { recordId } = (req.body || {}) as any;
   if (!recordId) return res.status(400).json({ error: 'Missing recordId' });
 
   await disableSellerOfferMessages(recordId);
@@ -545,9 +534,9 @@ app.post('/payout-channel', async (req, res) => {
     const {
       orderId, productName, sku, size, brand,
       payout, sellerCode, imageUrl, discordUserId, vatType
-    } = req.body || {};
+    } = (req.body || {}) as any;
 
-    const category = await client.channels.fetch(PAYOUT_CATEGORY_ID).catch(() => null);
+    const category: any = await client.channels.fetch(PAYOUT_CATEGORY_ID as string).catch(() => null);
     if (!category || !category.guild) return res.status(500).json({ error: 'Invalid payout category' });
 
     const guild = category.guild;
@@ -588,7 +577,7 @@ app.post('/payout-channel', async (req, res) => {
 
     const customId = `process_payout:${orderId}:${sellerCode}:${discordUserId}`;
 
-    const row = new ActionRowBuilder().addComponents(
+    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder()
         .setCustomId(customId)
         .setLabel('Process Deal')
@@ -608,11 +597,12 @@ app.post('/payout-channel', async (req, res) => {
   }
 });
 
-/* ---------------- NEW: POST /sync-lowest ---------------- */
+/* ---------------- POST /sync-lowest ---------------- */
+/* Updates the "Current Lowest Offer" field in your own WTB embeds */
 
 app.post('/sync-lowest', async (req, res) => {
   try {
-    const { orderId } = req.body || {};
+    const { orderId } = (req.body || {}) as any;
     if (!orderId) {
       return res.status(400).json({ error: 'Missing orderId' });
     }
@@ -644,7 +634,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
       const lines = embed.description.split('\n');
 
-      function get(label) {
+      function get(label: string) {
         const line = lines.find(l => l.startsWith(label));
         return line ? line.replace(label, '').trim() : null;
       }
@@ -665,25 +655,22 @@ client.on(Events.InteractionCreate, async interaction => {
         imageUrl: embed.image?.url || null
       };
 
-      // Send to your processing webhook
-      await fetch(PROCESS_DEAL_WEBHOOK_URL, {
+      await fetch(PROCESS_DEAL_WEBHOOK_URL as string, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       }).catch(() => null);
 
-      // Disable the button so it can't be clicked again
       const disabledComponents = interaction.message.components.map(row =>
-        new ActionRowBuilder().addComponents(
+        new ActionRowBuilder<ButtonBuilder>().addComponents(
           ...row.components.map(comp => ButtonBuilder.from(comp).setDisabled(true))
         )
       );
 
       await interaction.message.edit({ components: disabledComponents }).catch(() => null);
 
-      // Build the visible confirmation message in the channel
       const finalPayout =
-        Number.isFinite(payload.payout) ? payload.payout : null;
+        Number.isFinite(payload.payout as number) ? payload.payout as number : null;
 
       const payoutLine = finalPayout !== null
         ? `Final payout: €${finalPayout.toFixed(2)}`
@@ -695,9 +682,9 @@ client.on(Events.InteractionCreate, async interaction => {
         `📦\nThe shipping label will be sent shortly.\n\n` +
         `📬\nPlease prepare the package and ensure it is packed in a clean, unbranded box with no unnecessary stickers or markings. REMOVE ANY PRICETAGS!\n\n` +
         `❌\nDo not include anything inside the box, as this is not a standard deal.\n\n` +
-        `📸\nPlease pack it as professionally as possible. If you\'re unsure, feel free to take a photo of the package and share it here before shipping.`;
+        `📸\nPlease pack it as professionally as possible. If you're unsure, feel free to take a photo of the package and share it here before shipping.`;
 
-      await interaction.channel.send({
+      await interaction.channel?.send({
         content: `<@${discordUserId}>\n\n${infoMsg}`
       });
 
@@ -709,10 +696,9 @@ client.on(Events.InteractionCreate, async interaction => {
 
     /* ---- RETRY OFFER BUTTON (in DM) ---- */
     if (interaction.isButton() && interaction.customId.startsWith('retry_offer:')) {
-      const [, guildId, channelId, messageId] = interaction.customId.split(':');
+      const [, , , messageId] = interaction.customId.split(':');
 
-      // Find order for placeholder
-      let orderRecord = null;
+      let orderRecord: any = null;
       try {
         const recs = await base(ordersTableName)
           .select({
@@ -737,21 +723,21 @@ client.on(Events.InteractionCreate, async interaction => {
         .setTitle('Enter Seller ID, VAT & Offer');
 
       modal.addComponents(
-        new ActionRowBuilder().addComponents(
+        new ActionRowBuilder<TextInputBuilder>().addComponents(
           new TextInputBuilder()
             .setCustomId('seller_id')
             .setLabel('Seller ID (e.g. 00001)')
             .setStyle(TextInputStyle.Short)
             .setRequired(true)
         ),
-        new ActionRowBuilder().addComponents(
+        new ActionRowBuilder<TextInputBuilder>().addComponents(
           new TextInputBuilder()
             .setCustomId('vat_type')
             .setLabel('VAT Type (Margin / VAT0 / VAT21)')
             .setStyle(TextInputStyle.Short)
             .setRequired(true)
         ),
-        new ActionRowBuilder().addComponents(
+        new ActionRowBuilder<TextInputBuilder>().addComponents(
           new TextInputBuilder()
             .setCustomId('offer_price')
             .setLabel('Your Offer (€)')
@@ -769,8 +755,7 @@ client.on(Events.InteractionCreate, async interaction => {
     if (interaction.isButton() && interaction.customId === 'seller_offer') {
       const messageId = interaction.message.id;
 
-      // Look up order via Seller Offer Message ID so we can show current lowest
-      let orderRecord = null;
+      let orderRecord: any = null;
       try {
         const recs = await base(ordersTableName)
           .select({
@@ -795,21 +780,21 @@ client.on(Events.InteractionCreate, async interaction => {
         .setTitle('Enter Seller ID, VAT & Offer');
 
       modal.addComponents(
-        new ActionRowBuilder().addComponents(
+        new ActionRowBuilder<TextInputBuilder>().addComponents(
           new TextInputBuilder()
             .setCustomId('seller_id')
             .setLabel('Seller ID (e.g. 00001)')
             .setStyle(TextInputStyle.Short)
             .setRequired(true)
         ),
-        new ActionRowBuilder().addComponents(
+        new ActionRowBuilder<TextInputBuilder>().addComponents(
           new TextInputBuilder()
             .setCustomId('vat_type')
             .setLabel('VAT Type (Margin / VAT0 / VAT21)')
             .setStyle(TextInputStyle.Short)
             .setRequired(true)
         ),
-        new ActionRowBuilder().addComponents(
+        new ActionRowBuilder<TextInputBuilder>().addComponents(
           new TextInputBuilder()
             .setCustomId('offer_price')
             .setLabel('Your Offer (€)')
@@ -825,14 +810,9 @@ client.on(Events.InteractionCreate, async interaction => {
 
     /* ---- OFFER MODAL SUBMISSION ---- */
     if (interaction.isModalSubmit() && interaction.customId.startsWith('seller_offer_modal:')) {
-      const [_, messageId] = interaction.customId.split(':');
+      const [, messageId] = interaction.customId.split(':');
 
-      const jumpUrl = (interaction.guildId && interaction.channelId && messageId)
-        ? `https://discord.com/channels/${interaction.guildId}/${interaction.channelId}/${messageId}`
-        : null;
-
-      // Find the order for this message
-      let orderRecord = null;
+      let orderRecord: any = null;
       try {
         const recs = await base(ordersTableName)
           .select({
@@ -854,17 +834,12 @@ client.on(Events.InteractionCreate, async interaction => {
 
       if (!/^\d+$/.test(sellerDigits)) {
         const msg = '❌ Seller ID must be digits only.';
-        await interaction.reply({
-          content: msg,
-          ephemeral: true
-        });
-        if (retryCustomId) {
-          await safeDMWithRetry(
-            interaction.user,
-            `${msg}\n\nYou can try again by clicking the button below.`,
-            retryCustomId
-          );
-        }
+        await interaction.reply({ content: msg, ephemeral: true });
+        await safeDMWithRetry(
+          interaction.user,
+          `${msg}\n\nYou can try again by clicking the button below.`,
+          retryCustomId
+        );
         return;
       }
 
@@ -875,17 +850,12 @@ client.on(Events.InteractionCreate, async interaction => {
       );
       if (!vatInput) {
         const msg = '❌ VAT Type must be one of: Margin, VAT0, VAT21.';
-        await interaction.reply({
-          content: msg,
-          ephemeral: true
-        });
-        if (retryCustomId) {
-          await safeDMWithRetry(
-            interaction.user,
-            `${msg}\n\nYou can try again by clicking the button below.`,
-            retryCustomId
-          );
-        }
+        await interaction.reply({ content: msg, ephemeral: true });
+        await safeDMWithRetry(
+          interaction.user,
+          `${msg}\n\nYou can try again by clicking the button below.`,
+          retryCustomId
+        );
         return;
       }
 
@@ -895,17 +865,12 @@ client.on(Events.InteractionCreate, async interaction => {
 
       if (!Number.isFinite(offerPrice) || offerPrice <= 0) {
         const msg = '❌ Invalid offer price.';
-        await interaction.reply({
-          content: msg,
-          ephemeral: true
-        });
-        if (retryCustomId) {
-          await safeDMWithRetry(
-            interaction.user,
-            `${msg}\n\nYou can try again by clicking the button below.`,
-            retryCustomId
-          );
-        }
+        await interaction.reply({ content: msg, ephemeral: true });
+        await safeDMWithRetry(
+          interaction.user,
+          `${msg}\n\nYou can try again by clicking the button below.`,
+          retryCustomId
+        );
         return;
       }
 
@@ -917,10 +882,9 @@ client.on(Events.InteractionCreate, async interaction => {
         if (lowest) {
           const maxAllowedGross = lowest.normalized - MIN_UNDERCUT_STEP;
 
-          if (normalizedOffer > maxAllowedGross + 1e-9) {
+          if ((normalizedOffer as number) > maxAllowedGross + 1e-9) {
             const lowestStr = formatLowestForDisplay(lowest);
 
-            // Convert maxAllowedGross into the seller's VAT type
             let maxForSeller = maxAllowedGross;
             if (vatInput === 'VAT0') {
               maxForSeller = maxAllowedGross / 1.21;
@@ -944,18 +908,12 @@ client.on(Events.InteractionCreate, async interaction => {
               `Your offer must be at least **€${MIN_UNDERCUT_STEP.toFixed(2)}** lower than that.\n` +
               `Max allowed for your VAT type: **${maxDisplay}${altDisplay}**.`;
 
-            await interaction.reply({
-              content: msg,
-              ephemeral: true
-            });
-
-            if (retryCustomId) {
-              await safeDMWithRetry(
-                interaction.user,
-                `${msg}\n\nYour offer was **not** saved. You can try again by clicking the button below.`,
-                retryCustomId
-              );
-            }
+            await interaction.reply({ content: msg, ephemeral: true });
+            await safeDMWithRetry(
+              interaction.user,
+              `${msg}\n\nYour offer was **not** saved. You can try again by clicking the button below.`,
+              retryCustomId
+            );
             return;
           }
         }
@@ -972,21 +930,16 @@ client.on(Events.InteractionCreate, async interaction => {
       const sellerRecordId = sellers[0]?.id;
       if (!sellerRecordId) {
         const msg = `❌ Seller ${sellerCode} not found.`;
-        await interaction.reply({
-          content: msg,
-          ephemeral: true
-        });
-        if (retryCustomId) {
-          await safeDMWithRetry(
-            interaction.user,
-            `${msg}\n\nPlease check your Seller ID and try again by clicking the button below.`,
-            retryCustomId
-          );
-        }
+        await interaction.reply({ content: msg, ephemeral: true });
+        await safeDMWithRetry(
+          interaction.user,
+          `${msg}\n\nPlease check your Seller ID and try again by clicking the button below.`,
+          retryCustomId
+        );
         return;
       }
 
-      const fields = {
+      const fields: any = {
         'Seller Offer': offerPrice,
         'Offer VAT Type': vatInput,
         'Offer Cost (Normalized)': normalizedOffer,
@@ -999,7 +952,6 @@ client.on(Events.InteractionCreate, async interaction => {
 
       await base(sellerOffersTableName).create(fields);
 
-      // Ephemeral confirmation in the channel
       await interaction.reply({
         content:
           `✅ Offer submitted.\n` +
@@ -1008,9 +960,9 @@ client.on(Events.InteractionCreate, async interaction => {
         ephemeral: true
       });
 
-      // Extra confirmation via DM with a "Go To WTB" button
+      // DM confirmation with link to WTB list
       try {
-        const dmRow = new ActionRowBuilder().addComponents(
+        const dmRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
           new ButtonBuilder()
             .setLabel('Go To WTB')
             .setStyle(ButtonStyle.Link)
@@ -1024,7 +976,7 @@ client.on(Events.InteractionCreate, async interaction => {
             `In the meantime you can keep an eye on our WTB page to see if your offer is still the lowest:`,
           components: [dmRow]
         });
-      } catch (e) {
+      } catch (e: any) {
         console.warn('DM confirmation failed:', e.message);
       }
     }
