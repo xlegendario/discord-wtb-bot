@@ -457,7 +457,7 @@ app.post('/partner-wtb', async (req, res) => {
                 name: 'How to Offer',
                 value:
                   `The **Offer** button links directly to the deal in our server.\n` +
-                  `Not joined yet? Join first: https://discord.gg/Fw3gTmGt`,
+                  `Not joined yet? Join first: [JOIN](https://discord.gg/Fw3gTmGt)`,
                 inline: false
               }
             ],
