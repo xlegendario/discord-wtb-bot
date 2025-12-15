@@ -39,45 +39,47 @@ if (!DISCORD_TOKEN || !DISCORD_DEALS_CHANNEL_ID || !AIRTABLE_API_KEY || !AIRTABL
   process.exit(1);
 }
 
-const dealsChannelIds = DISCORD_DEALS_CHANNEL_ID.split(',')
-  .map(id => id.trim())
+const dealsChannelIds = String(DISCORD_DEALS_CHANNEL_ID)
+  .split(',')
+  .map((id) => id.trim())
   .filter(Boolean);
 
 // Airtable view URL for “See All WTB’s” button
 const WTB_URL =
   'https://airtable.com/invite/l?inviteId=invwmhpKlD6KmJe6n&inviteToken=a14697b7435e64f6ee429f8b59fbb07bc0474aaf66c8ff59068aa5ceb2842253&utm_medium=email&utm_source=product_team&utm_content=transactional-alerts';
 
+const INVITE_URL = 'https://discord.gg/Fw3gTmGt';
+
 /* ---------------- Airtable ---------------- */
 
 const base = new Airtable({ apiKey: AIRTABLE_API_KEY }).base(AIRTABLE_BASE_ID);
 
 const sellerOffersTableName = AIRTABLE_SELLER_OFFERS_TABLE || 'Seller Offers';
-const sellersTableName      = AIRTABLE_SELLERS_TABLE       || 'Sellers Database';
-const ordersTableName       = AIRTABLE_ORDERS_TABLE        || 'Unfulfilled Orders Log';
-const partnersTableName     = AIRTABLE_PARTNERS_TABLE      || 'Partnerships';
+const sellersTableName = AIRTABLE_SELLERS_TABLE || 'Sellers Database';
+const ordersTableName = AIRTABLE_ORDERS_TABLE || 'Unfulfilled Orders Log';
+const partnersTableName = AIRTABLE_PARTNERS_TABLE || 'Partnerships';
 
-const ORDER_FIELD_SELLER_MSG_IDS        = 'Seller Offer Message ID';
-const ORDER_FIELD_BUTTONS_DISABLED      = 'Seller Offer Buttons Disabled';
-const ORDER_FIELD_PARTNER_WTB_MSG_IDS   = 'Partner WTB Message IDs';   // still available if you ever want to use it
-const ORDER_FIELD_CURRENT_LOWEST_OFFER  = 'Current Lowest Offer';
+const ORDER_FIELD_SELLER_MSG_IDS = 'Seller Offer Message ID';
+const ORDER_FIELD_BUTTONS_DISABLED = 'Seller Offer Buttons Disabled';
+const ORDER_FIELD_CURRENT_LOWEST_OFFER = 'Current Lowest Offer';
 
-const PARTNER_FIELD_WEBHOOK_URL         = 'WTB Webhook URL';
-const PARTNER_FIELD_ACTIVE              = 'Active?';
-const PARTNER_FIELD_WTB_MESSAGES        = 'Partner WTB Messages';
+const PARTNER_FIELD_WEBHOOK_URL = 'WTB Webhook URL';
+const PARTNER_FIELD_ACTIVE = 'Active?';
+const PARTNER_FIELD_WTB_MESSAGES = 'Partner WTB Messages';
 
 /* ---------------- Utilities ---------------- */
 
 const MIN_UNDERCUT_STEP = 2.5;
 
-function normalizeVatType(raw: any) {
+function normalizeVatType(raw) {
   if (!raw) return null;
   if (raw === 'Margin') return 'Margin';
-  if (raw === 'VAT0')   return 'VAT0';
-  if (raw === 'VAT21')  return 'VAT21';
+  if (raw === 'VAT0') return 'VAT0';
+  if (raw === 'VAT21') return 'VAT21';
   return null;
 }
 
-function parseNumeric(value: any): number | null {
+function parseNumeric(value) {
   if (typeof value === 'number') return value;
   if (typeof value === 'string') {
     const n = parseFloat(value.replace(',', '.').replace(/[^\d.-]/g, ''));
@@ -91,7 +93,7 @@ function parseNumeric(value: any): number | null {
  * - VAT0 → *1.21
  * - Margin/VAT21 → as-is (treated as gross)
  */
-function getNormalized(price: number, vatType: string | null) {
+function getNormalized(price, vatType) {
   if (!Number.isFinite(price)) return null;
   if (vatType === 'VAT0') return price * 1.21;
   return price;
@@ -101,44 +103,42 @@ function getNormalized(price: number, vatType: string | null) {
  * Format lowest offer incl. VAT conversions
  * (used in the undercut error messaging).
  */
-function formatLowestForDisplay(lowest: { raw: number; vatType: string | null }) {
+function formatLowestForDisplay(lowest) {
   if (!lowest || typeof lowest.raw !== 'number') return 'N/A';
 
   let displayType = lowest.vatType;
   if (lowest.vatType === 'VAT21') displayType = 'Margin';
 
-  const base = `€${lowest.raw.toFixed(2)}${displayType ? ` (${displayType})` : ''}`;
+  const baseStr = `€${lowest.raw.toFixed(2)}${displayType ? ` (${displayType})` : ''}`;
 
   if (lowest.vatType === 'VAT21') {
     const asVat0 = lowest.raw / 1.21;
-    return `${base} / €${asVat0.toFixed(2)} (VAT0)`;
+    return `${baseStr} / €${asVat0.toFixed(2)} (VAT0)`;
   }
 
   if (lowest.vatType === 'VAT0') {
     const asMargin = lowest.raw * 1.21;
-    return `${base} / €${asMargin.toFixed(2)} (Margin)`;
+    return `${baseStr} / €${asMargin.toFixed(2)} (Margin)`;
   }
 
-  return base;
+  return baseStr;
 }
 
 // Safe DM helper with "Retry Offer" button
-async function safeDMWithRetry(user: any, content: string, retryCustomId: string | null) {
+async function safeDMWithRetry(user, content, retryCustomId) {
   try {
     if (!retryCustomId) {
       await user.send({ content });
       return;
     }
 
-    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-      new ButtonBuilder()
-        .setCustomId(retryCustomId)
-        .setLabel('Retry Offer')
-        .setStyle(ButtonStyle.Primary)
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(retryCustomId).setLabel('Retry Offer').setStyle(ButtonStyle.Primary)
     );
+
     await user.send({ content, components: [row] });
-  } catch (e: any) {
-    console.warn('DM failed:', e.message);
+  } catch (e) {
+    console.warn('DM failed:', e?.message || e);
   }
 }
 
@@ -149,41 +149,39 @@ const client = new Client({
   partials: [Partials.Channel]
 });
 
-client.once(Events.ClientReady, c => {
+client.once(Events.ClientReady, (c) => {
   console.log(`🤖 WTB Seller Offer Bot logged in as ${c.user.tag}`);
 });
 
 client.login(DISCORD_TOKEN);
 
-/* ---------------- Lowest offer calculation (for logic / placeholder in errors etc.) ---------------- */
+/* ---------------- Lowest offer calculation ---------------- */
 
-async function getCurrentLowest(orderId: string | null) {
+async function getCurrentLowest(orderId) {
   if (!orderId) return null;
 
   const offers = await base(sellerOffersTableName).select().all();
 
-  let best: { normalized: number; raw: number; vatType: string | null } | null = null;
+  let best = null;
 
   for (const rec of offers) {
-    const links = rec.get('Linked Orders') as any;
+    const links = rec.get('Linked Orders');
     if (!Array.isArray(links)) continue;
 
-    const matches = links.some((l: any) =>
-      typeof l === 'string' ? l === orderId : l?.id === orderId
-    );
+    const matches = links.some((l) => (typeof l === 'string' ? l === orderId : l?.id === orderId));
     if (!matches) continue;
 
     const price = parseNumeric(rec.get('Seller Offer'));
-    const vatRaw = rec.get('Offer VAT Type') as any;
+    const vatRaw = rec.get('Offer VAT Type');
     const vat = typeof vatRaw === 'string' ? vatRaw : vatRaw?.name;
     const vatNorm = normalizeVatType(vat);
     if (!price) continue;
 
     const normalized = getNormalized(price, vatNorm);
-    if (!Number.isFinite(normalized!)) continue;
+    if (!Number.isFinite(normalized)) continue;
 
-    if (!best || (normalized as number) < best.normalized) {
-      best = { normalized: normalized as number, raw: price, vatType: vatNorm };
+    if (!best || normalized < best.normalized) {
+      best = { normalized, raw: price, vatType: vatNorm };
     }
   }
 
@@ -194,36 +192,32 @@ async function getCurrentLowest(orderId: string | null) {
   if (!order) return null;
 
   const maxPrice = parseNumeric(order.get('Maximum Buying Price'));
-  if (!Number.isFinite(maxPrice!)) return null;
+  if (!Number.isFinite(maxPrice)) return null;
 
-  return {
-    normalized: maxPrice as number,
-    raw: maxPrice as number,
-    vatType: 'Margin'
-  };
+  return { normalized: maxPrice, raw: maxPrice, vatType: 'Margin' };
 }
 
-/* ---------------- Disable messages (only in your own server) ---------------- */
+/* ---------------- Disable messages (your server) ---------------- */
 
-async function disableSellerOfferMessages(orderId: string) {
+async function disableSellerOfferMessages(orderId) {
   const order = await base(ordersTableName).find(orderId).catch(() => null);
   if (!order) return;
 
   const rawIds = order.get(ORDER_FIELD_SELLER_MSG_IDS);
   if (rawIds) {
-    const msgIds = String(rawIds).split(',').map(x => x.trim()).filter(Boolean);
+    const msgIds = String(rawIds).split(',').map((x) => x.trim()).filter(Boolean);
 
     for (const channelId of dealsChannelIds) {
-      const channel: any = await client.channels.fetch(channelId).catch(() => null);
+      const channel = await client.channels.fetch(channelId).catch(() => null);
       if (!channel) continue;
 
       for (const id of msgIds) {
         const msg = await channel.messages.fetch(id).catch(() => null);
         if (!msg) continue;
 
-        const disabled = msg.components.map((row: any) =>
-          new ActionRowBuilder<ButtonBuilder>().addComponents(
-            ...row.components.map((btn: any) => ButtonBuilder.from(btn).setDisabled(true))
+        const disabled = msg.components.map((row) =>
+          new ActionRowBuilder().addComponents(
+            ...row.components.map((btn) => ButtonBuilder.from(btn).setDisabled(true))
           )
         );
 
@@ -232,14 +226,12 @@ async function disableSellerOfferMessages(orderId: string) {
     }
   }
 
-  await base(ordersTableName)
-    .update(orderId, { [ORDER_FIELD_BUTTONS_DISABLED]: true })
-    .catch(() => null);
+  await base(ordersTableName).update(orderId, { [ORDER_FIELD_BUTTONS_DISABLED]: true }).catch(() => null);
 }
 
-/* ---------------- Update "Current Lowest Offer" (your own WTB messages) ---------------- */
+/* ---------------- Update "Current Lowest Offer" in your server embeds ---------------- */
 
-async function updateLowestOfferDisplays(orderId: string) {
+async function updateLowestOfferDisplays(orderId) {
   if (!orderId) return;
 
   const order = await base(ordersTableName).find(orderId).catch(() => null);
@@ -251,13 +243,10 @@ async function updateLowestOfferDisplays(orderId: string) {
   const rawInternalIds = order.get(ORDER_FIELD_SELLER_MSG_IDS);
   if (!rawInternalIds) return;
 
-  const msgIds = String(rawInternalIds)
-    .split(',')
-    .map(x => x.trim())
-    .filter(Boolean);
+  const msgIds = String(rawInternalIds).split(',').map((x) => x.trim()).filter(Boolean);
 
   for (const channelId of dealsChannelIds) {
-    const channel: any = await client.channels.fetch(channelId).catch(() => null);
+    const channel = await client.channels.fetch(channelId).catch(() => null);
     if (!channel) continue;
 
     for (const id of msgIds) {
@@ -267,13 +256,8 @@ async function updateLowestOfferDisplays(orderId: string) {
       const oldEmbed = msg.embeds[0];
       const newEmbed = EmbedBuilder.from(oldEmbed);
 
-      const existingFields = Array.isArray(newEmbed.data?.fields)
-        ? newEmbed.data.fields
-        : [];
-
-      const filteredFields = existingFields.filter(
-        (f: any) => f.name !== 'Current Lowest Offer'
-      );
+      const existingFields = Array.isArray(newEmbed.data?.fields) ? newEmbed.data.fields : [];
+      const filteredFields = existingFields.filter((f) => f.name !== 'Current Lowest Offer');
 
       filteredFields.push({
         name: 'Current Lowest Offer',
@@ -297,20 +281,12 @@ async function getActivePartners() {
     })
     .all();
 
-  return records.map(rec => ({
+  return records.map((rec) => ({
     id: rec.id,
-    name: rec.get('Name') as string,
-    webhookUrl: rec.get(PARTNER_FIELD_WEBHOOK_URL) as string,
-    messagesLog: (rec.get(PARTNER_FIELD_WTB_MESSAGES) as string) || ''
+    name: rec.get('Name'),
+    webhookUrl: rec.get(PARTNER_FIELD_WEBHOOK_URL),
+    messagesLog: rec.get(PARTNER_FIELD_WTB_MESSAGES) || ''
   }));
-}
-
-/* ---------------- Helper: parse Discord webhook URL ---------------- */
-
-function parseWebhookUrl(url: string) {
-  const m = url.match(/https:\/\/discord\.com\/api\/webhooks\/([^/]+)\/([^/?]+)/);
-  if (!m) return null;
-  return { webhookId: m[1], webhookToken: m[2] };
 }
 
 /* ---------------- Express API ---------------- */
@@ -322,11 +298,11 @@ app.use(express.json({ limit: '2mb' }));
 app.get('/', (_req, res) => res.send('WTB Seller Offers Bot OK'));
 
 /* ---------------- POST /partner-offer-deal ---------------- */
-/* (your internal WTB in your own server) */
+/* Internal WTB in your own server */
 
-async function sendOfferDeal(req: express.Request, res: express.Response) {
+async function sendOfferDeal(req, res) {
   try {
-    const { productName, sku, size, brand, imageUrl, recordId } = (req.body || {}) as any;
+    const { productName, sku, size, brand, imageUrl, recordId } = req.body || {};
 
     // Read current lowest from the order (for initial embed)
     let currentLowestDisplay = 'No offers yet';
@@ -340,9 +316,7 @@ async function sendOfferDeal(req: express.Request, res: express.Response) {
 
     const embed = new EmbedBuilder()
       .setTitle('🔥 NEW WTB DEAL 🔥')
-      .setDescription(
-        `**${productName}**\n${sku}\n${size}\n${brand}`
-      )
+      .setDescription(`**${productName}**\n${sku}\n${size}\n${brand}`)
       .setColor(0xf1c40f)
       .addFields({
         name: 'Current Lowest Offer',
@@ -352,43 +326,31 @@ async function sendOfferDeal(req: express.Request, res: express.Response) {
 
     if (imageUrl) embed.setImage(imageUrl);
 
-    const messageIds: string[] = [];
-    const messageUrls: string[] = [];
+    const messageIds = [];
+    const messageUrls = [];
 
     for (const channelId of dealsChannelIds) {
-      const channel: any = await client.channels.fetch(channelId).catch(() => null);
+      const channel = await client.channels.fetch(channelId).catch(() => null);
       if (!channel) continue;
 
-      const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-        new ButtonBuilder()
-          .setCustomId('seller_offer')
-          .setLabel('Offer')
-          .setStyle(ButtonStyle.Success),
-
-        new ButtonBuilder()
-          .setLabel("See All WTB's")
-          .setStyle(ButtonStyle.Link)
-          .setURL(WTB_URL)
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('seller_offer').setLabel('Offer').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setLabel("See All WTB's").setStyle(ButtonStyle.Link).setURL(WTB_URL)
       );
 
-      const msg = await channel.send({
-        embeds: [embed],
-        components: [row]
-      });
+      const msg = await channel.send({ embeds: [embed], components: [row] });
 
       messageIds.push(msg.id);
       messageUrls.push(msg.url);
     }
 
     if (recordId) {
-      const updateFields: any = {
+      const updateFields = {
         [ORDER_FIELD_SELLER_MSG_IDS]: messageIds.join(','),
         [ORDER_FIELD_BUTTONS_DISABLED]: false
       };
 
-      if (messageUrls.length > 0) {
-        updateFields['Offer Message URL'] = messageUrls[0];
-      }
+      if (messageUrls.length > 0) updateFields['Offer Message URL'] = messageUrls[0];
 
       await base(ordersTableName).update(recordId, updateFields);
     }
@@ -408,56 +370,38 @@ app.post('/partner-deal', sendOfferDeal);
 
 app.post('/partner-wtb', async (req, res) => {
   try {
-    const { productName, sku, size, brand, imageUrl, recordId } = (req.body || {}) as any;
+    const { productName, sku, size, brand, imageUrl, recordId } = req.body || {};
 
-    if (!recordId) {
-      return res.status(400).json({ error: 'recordId is required' });
-    }
+    if (!recordId) return res.status(400).json({ error: 'recordId is required' });
 
     const order = await base(ordersTableName).find(recordId).catch(() => null);
-    if (!order) {
-      return res.status(404).json({ error: 'Order not found in Airtable' });
-    }
+    if (!order) return res.status(404).json({ error: 'Order not found in Airtable' });
 
-    const offerMessageUrl = order.get('Offer Message URL') as string;
-    if (!offerMessageUrl) {
-      return res.status(400).json({ error: 'Offer Message URL is empty for this order' });
-    }
+    const offerMessageUrl = order.get('Offer Message URL');
+    if (!offerMessageUrl) return res.status(400).json({ error: 'Offer Message URL is empty for this order' });
 
     const currentLowestRaw = order.get(ORDER_FIELD_CURRENT_LOWEST_OFFER);
     const currentLowestDisplay = currentLowestRaw ? String(currentLowestRaw) : 'No offers yet';
 
     const partners = await getActivePartners();
-    if (!partners.length) {
-      return res.json({ ok: true, message: 'No active partners found' });
-    }
+    if (!partners.length) return res.json({ ok: true, message: 'No active partners found' });
 
-    const sentByPartner: { partnerId: string; messageId: string }[] = [];
+    const sentByPartner = [];
 
     for (const partner of partners) {
-      const webhookInfo = parseWebhookUrl(partner.webhookUrl);
-      if (!webhookInfo) {
-        console.warn(`Invalid webhook URL for partner ${partner.name}: ${partner.webhookUrl}`);
-        continue;
-      }
-
-      const payload: any = {
+      const payload = {
         embeds: [
           {
             title: '🔥 NEW WTB DEAL 🔥',
             description: `**${productName}**\n${sku}\n${size}\n${brand}`,
             color: 0xf1c40f,
             fields: [
-              {
-                name: 'Current Lowest Offer',
-                value: `${currentLowestDisplay}`,
-                inline: false
-              },
+              { name: 'Current Lowest Offer', value: `${currentLowestDisplay}`, inline: false },
               {
                 name: 'How to Offer',
                 value:
                   `The **Offer** button links directly to the deal in our server.\n` +
-                  `Not joined yet? Join first: [JOIN HERE](https://discord.gg/Fw3gTmGt)`,
+                  `Not joined yet? Join first: [JOIN HERE](${INVITE_URL})`,
                 inline: false
               }
             ],
@@ -468,18 +412,8 @@ app.post('/partner-wtb', async (req, res) => {
           {
             type: 1,
             components: [
-              {
-                type: 2,
-                style: 5, // Link button
-                label: 'Offer',
-                url: offerMessageUrl
-              },
-              {
-                type: 2,
-                style: 5,
-                label: "See All WTB's",
-                url: WTB_URL
-              }
+              { type: 2, style: 5, label: 'Offer', url: offerMessageUrl },
+              { type: 2, style: 5, label: "See All WTB's", url: WTB_URL }
             ]
           }
         ]
@@ -489,7 +423,7 @@ app.post('/partner-wtb', async (req, res) => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
-      }).catch(err => {
+      }).catch((err) => {
         console.error('Error sending partner webhook:', err);
         return null;
       });
@@ -499,19 +433,17 @@ app.post('/partner-wtb', async (req, res) => {
         continue;
       }
 
-      const data: any = await resp.json();
+      const data = await resp.json();
       const messageId = data.id;
+
       if (messageId) {
         sentByPartner.push({ partnerId: partner.id, messageId });
 
-        // Log in Partnerships table: orderId:messageId
         const prevLog = partner.messagesLog || '';
         const newLine = `${recordId}:${messageId}`;
         const updatedLog = prevLog ? `${prevLog}\n${newLine}` : newLine;
 
-        await base(partnersTableName).update(partner.id, {
-          [PARTNER_FIELD_WTB_MESSAGES]: updatedLog
-        }).catch(() => null);
+        await base(partnersTableName).update(partner.id, { [PARTNER_FIELD_WTB_MESSAGES]: updatedLog }).catch(() => null);
       }
     }
 
@@ -525,7 +457,7 @@ app.post('/partner-wtb', async (req, res) => {
 /* ---------------- POST /seller-offer/disable ---------------- */
 
 app.post('/seller-offer/disable', async (req, res) => {
-  const { recordId } = (req.body || {}) as any;
+  const { recordId } = req.body || {};
   if (!recordId) return res.status(400).json({ error: 'Missing recordId' });
 
   await disableSellerOfferMessages(recordId);
@@ -536,12 +468,10 @@ app.post('/seller-offer/disable', async (req, res) => {
 
 app.post('/payout-channel', async (req, res) => {
   try {
-    const {
-      orderId, productName, sku, size, brand,
-      payout, sellerCode, imageUrl, discordUserId, vatType
-    } = (req.body || {}) as any;
+    const { orderId, productName, sku, size, brand, payout, sellerCode, imageUrl, discordUserId, vatType } =
+      req.body || {};
 
-    const category: any = await client.channels.fetch(PAYOUT_CATEGORY_ID as string).catch(() => null);
+    const category = await client.channels.fetch(PAYOUT_CATEGORY_ID).catch(() => null);
     if (!category || !category.guild) return res.status(500).json({ error: 'Invalid payout category' });
 
     const guild = category.guild;
@@ -549,7 +479,7 @@ app.post('/payout-channel', async (req, res) => {
     await guild.members.fetch(discordUserId).catch(() => null);
 
     const channel = await guild.channels.create({
-      name: `wtb-${orderId}`.toLowerCase(),
+      name: `wtb-${String(orderId || '').toLowerCase()}`,
       parent: category.id,
       permissionOverwrites: [
         { id: guild.roles.everyone, deny: [PermissionsBitField.Flags.ViewChannel] },
@@ -564,17 +494,19 @@ app.post('/payout-channel', async (req, res) => {
       ]
     });
 
+    const payoutNum = Number(payout);
+
     const embed = new EmbedBuilder()
       .setTitle('✅ Offer Accepted')
       .setDescription(
         `**Order:** ${orderId}\n` +
-        `**Product:** ${productName}\n` +
-        `**SKU:** ${sku}\n` +
-        `**Size:** ${size}\n` +
-        `**Brand:** ${brand}\n` +
-        `**Payout:** €${Number(payout).toFixed(2)}\n` +
-        `**Seller:** ${sellerCode}\n` +
-        (vatType ? `**VAT Type:** ${vatType}\n` : '')
+          `**Product:** ${productName}\n` +
+          `**SKU:** ${sku}\n` +
+          `**Size:** ${size}\n` +
+          `**Brand:** ${brand}\n` +
+          `**Payout:** €${Number.isFinite(payoutNum) ? payoutNum.toFixed(2) : '0.00'}\n` +
+          `**Seller:** ${sellerCode}\n` +
+          (vatType ? `**VAT Type:** ${vatType}\n` : '')
       )
       .setColor(0xf1c40f);
 
@@ -582,18 +514,11 @@ app.post('/payout-channel', async (req, res) => {
 
     const customId = `process_payout:${orderId}:${sellerCode}:${discordUserId}`;
 
-    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-      new ButtonBuilder()
-        .setCustomId(customId)
-        .setLabel('Process Deal')
-        .setStyle(ButtonStyle.Primary)
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(customId).setLabel('Process Deal').setStyle(ButtonStyle.Primary)
     );
 
-    await channel.send({
-      content: `<@${discordUserId}>`,
-      embeds: [embed],
-      components: [row]
-    });
+    await channel.send({ content: `<@${discordUserId}>`, embeds: [embed], components: [row] });
 
     return res.json({ ok: true, channelId: channel.id });
   } catch (err) {
@@ -603,17 +528,13 @@ app.post('/payout-channel', async (req, res) => {
 });
 
 /* ---------------- POST /sync-lowest ---------------- */
-/* Updates the "Current Lowest Offer" field in your own WTB embeds */
 
 app.post('/sync-lowest', async (req, res) => {
   try {
-    const { orderId } = (req.body || {}) as any;
-    if (!orderId) {
-      return res.status(400).json({ error: 'Missing orderId' });
-    }
+    const { orderId } = req.body || {};
+    if (!orderId) return res.status(400).json({ error: 'Missing orderId' });
 
     await updateLowestOfferDisplays(orderId);
-
     return res.json({ ok: true });
   } catch (err) {
     console.error('Error in /sync-lowest:', err);
@@ -623,7 +544,7 @@ app.post('/sync-lowest', async (req, res) => {
 
 /* ---------------- Discord Interaction Logic ---------------- */
 
-client.on(Events.InteractionCreate, async interaction => {
+client.on(Events.InteractionCreate, async (interaction) => {
   try {
     /* ---- PROCESS DEAL BUTTON ---- */
     if (interaction.isButton() && interaction.customId.startsWith('process_payout:')) {
@@ -631,21 +552,17 @@ client.on(Events.InteractionCreate, async interaction => {
 
       const embed = interaction.message.embeds?.[0];
       if (!embed || !embed.description) {
-        return interaction.reply({
-          content: '❌ Missing deal details on this message.',
-          ephemeral: true
-        });
+        return interaction.reply({ content: '❌ Missing deal details on this message.', ephemeral: true });
       }
 
       const lines = embed.description.split('\n');
-
-      function get(label: string) {
-        const line = lines.find(l => l.startsWith(label));
+      const get = (label) => {
+        const line = lines.find((l) => l.startsWith(label));
         return line ? line.replace(label, '').trim() : null;
-      }
+      };
 
       const payoutRaw = get('**Payout:**') || '';
-      const payoutNumber = parseFloat(payoutRaw.replace('€', '').replace(',', '.'));
+      const payoutNumber = parseFloat(String(payoutRaw).replace('€', '').replace(',', '.'));
 
       const payload = {
         orderId: get('**Order:**'),
@@ -660,26 +577,22 @@ client.on(Events.InteractionCreate, async interaction => {
         imageUrl: embed.image?.url || null
       };
 
-      await fetch(PROCESS_DEAL_WEBHOOK_URL as string, {
+      await fetch(PROCESS_DEAL_WEBHOOK_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       }).catch(() => null);
 
-      const disabledComponents = interaction.message.components.map(row =>
-        new ActionRowBuilder<ButtonBuilder>().addComponents(
-          ...row.components.map(comp => ButtonBuilder.from(comp).setDisabled(true))
+      const disabledComponents = interaction.message.components.map((row) =>
+        new ActionRowBuilder().addComponents(
+          ...row.components.map((comp) => ButtonBuilder.from(comp).setDisabled(true))
         )
       );
 
       await interaction.message.edit({ components: disabledComponents }).catch(() => null);
 
-      const finalPayout =
-        Number.isFinite(payload.payout as number) ? payload.payout as number : null;
-
-      const payoutLine = finalPayout !== null
-        ? `Final payout: €${finalPayout.toFixed(2)}`
-        : 'Final payout: see deal details above';
+      const finalPayout = Number.isFinite(payload.payout) ? payload.payout : null;
+      const payoutLine = finalPayout !== null ? `Final payout: €${finalPayout.toFixed(2)}` : 'Final payout: see deal details above';
 
       const infoMsg =
         `✅ Deal processed!\n\n` +
@@ -689,78 +602,16 @@ client.on(Events.InteractionCreate, async interaction => {
         `❌\nDo not include anything inside the box, as this is not a standard deal.\n\n` +
         `📸\nPlease pack it as professionally as possible. If you're unsure, feel free to take a photo of the package and share it here before shipping.`;
 
-      await interaction.channel?.send({
-        content: `<@${discordUserId}>\n\n${infoMsg}`
-      });
+      await interaction.channel?.send({ content: `<@${discordUserId}>\n\n${infoMsg}` });
 
-      return interaction.reply({
-        content: '✅ Deal processed and instructions sent in this channel.',
-        ephemeral: true
-      });
+      return interaction.reply({ content: '✅ Deal processed and instructions sent in this channel.', ephemeral: true });
     }
 
-    /* ---- RETRY OFFER BUTTON (in DM) ---- */
-    if (interaction.isButton() && interaction.customId.startsWith('retry_offer:')) {
-      const [, , , messageId] = interaction.customId.split(':');
-
-      let orderRecord: any = null;
-      try {
-        const recs = await base(ordersTableName)
-          .select({
-            filterByFormula: `SEARCH("${messageId}", {${ORDER_FIELD_SELLER_MSG_IDS}})`,
-            maxRecords: 1
-          })
-          .firstPage();
-        orderRecord = recs[0] || null;
-      } catch (_) {}
-
-      let offerPlaceholder = 'Enter your offer (e.g. 140)';
-
-      if (orderRecord) {
-        const currentLowestRaw = orderRecord.get(ORDER_FIELD_CURRENT_LOWEST_OFFER);
-        if (currentLowestRaw) {
-          offerPlaceholder = `Current Lowest Offer: ${currentLowestRaw}`;
-        }
-      }
-
-      const modal = new ModalBuilder()
-        .setCustomId(`seller_offer_modal:${messageId}`)
-        .setTitle('Enter Seller ID, VAT & Offer');
-
-      modal.addComponents(
-        new ActionRowBuilder<TextInputBuilder>().addComponents(
-          new TextInputBuilder()
-            .setCustomId('seller_id')
-            .setLabel('Seller ID (e.g. 00001)')
-            .setStyle(TextInputStyle.Short)
-            .setRequired(true)
-        ),
-        new ActionRowBuilder<TextInputBuilder>().addComponents(
-          new TextInputBuilder()
-            .setCustomId('vat_type')
-            .setLabel('VAT Type (Margin / VAT0 / VAT21)')
-            .setStyle(TextInputStyle.Short)
-            .setRequired(true)
-        ),
-        new ActionRowBuilder<TextInputBuilder>().addComponents(
-          new TextInputBuilder()
-            .setCustomId('offer_price')
-            .setLabel('Your Offer (€)')
-            .setStyle(TextInputStyle.Short)
-            .setRequired(true)
-            .setPlaceholder(offerPlaceholder)
-        )
-      );
-
-      await interaction.showModal(modal);
-      return;
-    }
-
-    /* ---- OFFER BUTTON (in WTB channel) ---- */
+    /* ---- OFFER BUTTON ---- */
     if (interaction.isButton() && interaction.customId === 'seller_offer') {
       const messageId = interaction.message.id;
 
-      let orderRecord: any = null;
+      let orderRecord = null;
       try {
         const recs = await base(ordersTableName)
           .select({
@@ -772,12 +623,9 @@ client.on(Events.InteractionCreate, async interaction => {
       } catch (_) {}
 
       let offerPlaceholder = 'Enter your offer (e.g. 140)';
-
       if (orderRecord) {
         const currentLowestRaw = orderRecord.get(ORDER_FIELD_CURRENT_LOWEST_OFFER);
-        if (currentLowestRaw) {
-          offerPlaceholder = `Current Lowest Offer: ${currentLowestRaw}`;
-        }
+        if (currentLowestRaw) offerPlaceholder = `Current Lowest Offer: ${currentLowestRaw}`;
       }
 
       const modal = new ModalBuilder()
@@ -785,21 +633,21 @@ client.on(Events.InteractionCreate, async interaction => {
         .setTitle('Enter Seller ID, VAT & Offer');
 
       modal.addComponents(
-        new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new ActionRowBuilder().addComponents(
           new TextInputBuilder()
             .setCustomId('seller_id')
             .setLabel('Seller ID (e.g. 00001)')
             .setStyle(TextInputStyle.Short)
             .setRequired(true)
         ),
-        new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new ActionRowBuilder().addComponents(
           new TextInputBuilder()
             .setCustomId('vat_type')
             .setLabel('VAT Type (Margin / VAT0 / VAT21)')
             .setStyle(TextInputStyle.Short)
             .setRequired(true)
         ),
-        new ActionRowBuilder<TextInputBuilder>().addComponents(
+        new ActionRowBuilder().addComponents(
           new TextInputBuilder()
             .setCustomId('offer_price')
             .setLabel('Your Offer (€)')
@@ -817,7 +665,7 @@ client.on(Events.InteractionCreate, async interaction => {
     if (interaction.isModalSubmit() && interaction.customId.startsWith('seller_offer_modal:')) {
       const [, messageId] = interaction.customId.split(':');
 
-      let orderRecord: any = null;
+      let orderRecord = null;
       try {
         const recs = await base(ordersTableName)
           .select({
@@ -825,7 +673,6 @@ client.on(Events.InteractionCreate, async interaction => {
             maxRecords: 1
           })
           .firstPage();
-
         orderRecord = recs[0] || null;
       } catch (_) {}
 
@@ -840,71 +687,51 @@ client.on(Events.InteractionCreate, async interaction => {
       if (!/^\d+$/.test(sellerDigits)) {
         const msg = '❌ Seller ID must be digits only.';
         await interaction.reply({ content: msg, ephemeral: true });
-        await safeDMWithRetry(
-          interaction.user,
-          `${msg}\n\nYou can try again by clicking the button below.`,
-          retryCustomId
-        );
+        await safeDMWithRetry(interaction.user, `${msg}\n\nYou can try again by clicking the button below.`, retryCustomId);
         return;
       }
 
       const sellerCode = `SE-${sellerDigits}`;
 
-      const vatInput = normalizeVatType(
-        interaction.fields.getTextInputValue('vat_type').trim()
-      );
+      const vatInput = normalizeVatType(interaction.fields.getTextInputValue('vat_type').trim());
       if (!vatInput) {
         const msg = '❌ VAT Type must be one of: Margin, VAT0, VAT21.';
         await interaction.reply({ content: msg, ephemeral: true });
-        await safeDMWithRetry(
-          interaction.user,
-          `${msg}\n\nYou can try again by clicking the button below.`,
-          retryCustomId
-        );
+        await safeDMWithRetry(interaction.user, `${msg}\n\nYou can try again by clicking the button below.`, retryCustomId);
         return;
       }
 
-      const offerPrice = parseFloat(
-        interaction.fields.getTextInputValue('offer_price').replace(',', '.')
-      );
-
+      const offerPrice = parseFloat(interaction.fields.getTextInputValue('offer_price').replace(',', '.'));
       if (!Number.isFinite(offerPrice) || offerPrice <= 0) {
         const msg = '❌ Invalid offer price.';
         await interaction.reply({ content: msg, ephemeral: true });
-        await safeDMWithRetry(
-          interaction.user,
-          `${msg}\n\nYou can try again by clicking the button below.`,
-          retryCustomId
-        );
+        await safeDMWithRetry(interaction.user, `${msg}\n\nYou can try again by clicking the button below.`, retryCustomId);
         return;
       }
 
       const normalizedOffer = getNormalized(offerPrice, vatInput);
 
-      // undercut logic with human-friendly messaging
+      // undercut logic
       if (orderId) {
         const lowest = await getCurrentLowest(orderId);
         if (lowest) {
           const maxAllowedGross = lowest.normalized - MIN_UNDERCUT_STEP;
 
-          if ((normalizedOffer as number) > maxAllowedGross + 1e-9) {
+          if (normalizedOffer > maxAllowedGross + 1e-9) {
             const lowestStr = formatLowestForDisplay(lowest);
 
             let maxForSeller = maxAllowedGross;
-            if (vatInput === 'VAT0') {
-              maxForSeller = maxAllowedGross / 1.21;
-            }
+            if (vatInput === 'VAT0') maxForSeller = maxAllowedGross / 1.21;
+
             const maxForSellerRounded = Math.floor(maxForSeller * 100) / 100;
 
             let maxDisplay = `€${maxForSellerRounded.toFixed(2)} (${vatInput})`;
             let altDisplay = '';
 
             if (vatInput === 'VAT0') {
-              const equivMargin = maxForSellerRounded * 1.21;
-              altDisplay = ` / ≈€${equivMargin.toFixed(2)} (Margin)`;
+              altDisplay = ` / ≈€${(maxForSellerRounded * 1.21).toFixed(2)} (Margin)`;
             } else if (vatInput === 'VAT21') {
-              const equivVat0 = maxForSellerRounded / 1.21;
-              altDisplay = ` / ≈€${equivVat0.toFixed(2)} (VAT0)`;
+              altDisplay = ` / ≈€${(maxForSellerRounded / 1.21).toFixed(2)} (VAT0)`;
             }
 
             const msg =
@@ -914,11 +741,7 @@ client.on(Events.InteractionCreate, async interaction => {
               `Max allowed for your VAT type: **${maxDisplay}${altDisplay}**.`;
 
             await interaction.reply({ content: msg, ephemeral: true });
-            await safeDMWithRetry(
-              interaction.user,
-              `${msg}\n\nYour offer was **not** saved. You can try again by clicking the button below.`,
-              retryCustomId
-            );
+            await safeDMWithRetry(interaction.user, `${msg}\n\nYour offer was **not** saved. You can try again by clicking the button below.`, retryCustomId);
             return;
           }
         }
@@ -926,25 +749,18 @@ client.on(Events.InteractionCreate, async interaction => {
 
       // lookup seller
       const sellers = await base(sellersTableName)
-        .select({
-          filterByFormula: `{Seller ID} = "${sellerCode}"`,
-          maxRecords: 1
-        })
+        .select({ filterByFormula: `{Seller ID} = "${sellerCode}"`, maxRecords: 1 })
         .firstPage();
 
       const sellerRecordId = sellers[0]?.id;
       if (!sellerRecordId) {
         const msg = `❌ Seller ${sellerCode} not found.`;
         await interaction.reply({ content: msg, ephemeral: true });
-        await safeDMWithRetry(
-          interaction.user,
-          `${msg}\n\nPlease check your Seller ID and try again by clicking the button below.`,
-          retryCustomId
-        );
+        await safeDMWithRetry(interaction.user, `${msg}\n\nPlease check your Seller ID and try again by clicking the button below.`, retryCustomId);
         return;
       }
 
-      const fields: any = {
+      const fields = {
         'Seller Offer': offerPrice,
         'Offer VAT Type': vatInput,
         'Offer Cost (Normalized)': normalizedOffer,
@@ -958,20 +774,14 @@ client.on(Events.InteractionCreate, async interaction => {
       await base(sellerOffersTableName).create(fields);
 
       await interaction.reply({
-        content:
-          `✅ Offer submitted.\n` +
-          `Seller: ${sellerCode}\n` +
-          `Offer: €${offerPrice.toFixed(2)} (${vatInput})`,
+        content: `✅ Offer submitted.\nSeller: ${sellerCode}\nOffer: €${offerPrice.toFixed(2)} (${vatInput})`,
         ephemeral: true
       });
 
-      // DM confirmation with link to WTB list
+      // DM confirmation
       try {
-        const dmRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
-          new ButtonBuilder()
-            .setLabel('Go To WTB')
-            .setStyle(ButtonStyle.Link)
-            .setURL(WTB_URL)
+        const dmRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setLabel('Go To WTB').setStyle(ButtonStyle.Link).setURL(WTB_URL)
         );
 
         await interaction.user.send({
@@ -981,8 +791,8 @@ client.on(Events.InteractionCreate, async interaction => {
             `In the meantime you can keep an eye on our WTB page to see if your offer is still the lowest:`,
           components: [dmRow]
         });
-      } catch (e: any) {
-        console.warn('DM confirmation failed:', e.message);
+      } catch (e) {
+        console.warn('DM confirmation failed:', e?.message || e);
       }
     }
   } catch (err) {
@@ -992,6 +802,4 @@ client.on(Events.InteractionCreate, async interaction => {
 
 /* ---------------- Start HTTP server ---------------- */
 
-app.listen(PORT, () =>
-  console.log(`🌐 WTB Seller Offers Bot running on port ${PORT}`)
-);
+app.listen(PORT, () => console.log(`🌐 WTB Seller Offers Bot running on port ${PORT}`));
