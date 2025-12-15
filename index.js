@@ -44,7 +44,7 @@ const dealsChannelIds = String(DISCORD_DEALS_CHANNEL_ID)
   .map((id) => id.trim())
   .filter(Boolean);
 
-// Airtable view URL for “See All WTB’s” button
+// Airtable view URL for “See All WTB’s”
 const WTB_URL =
   'https://airtable.com/invite/l?inviteId=invwmhpKlD6KmJe6n&inviteToken=a14697b7435e64f6ee429f8b59fbb07bc0474aaf66c8ff59068aa5ceb2842253&utm_medium=email&utm_source=product_team&utm_content=transactional-alerts';
 
@@ -366,7 +366,7 @@ app.post('/partner-offer-deal', sendOfferDeal);
 app.post('/partner-deal', sendOfferDeal);
 
 /* ---------------- POST /partner-wtb ---------------- */
-/* Sends WTB embed into partner servers via webhooks */
+/* Sends WTB embed into partner servers via webhooks (LINKS IN EMBED TEXT, NO BUTTONS) */
 
 app.post('/partner-wtb', async (req, res) => {
   try {
@@ -389,35 +389,23 @@ app.post('/partner-wtb', async (req, res) => {
     const sentByPartner = [];
 
     for (const partner of partners) {
-      const payload = {
-        embeds: [
-          {
-            title: '🔥 NEW WTB DEAL 🔥',
-            description: `**${productName}**\n${sku}\n${size}\n${brand}`,
-            color: 0xf1c40f,
-            fields: [
-              { name: 'Current Lowest Offer', value: `${currentLowestDisplay}`, inline: false },
-              {
-                name: 'How to Offer',
-                value:
-                  `The **Offer** button links directly to the deal in our server.\n` +
-                  `Not joined yet? Join first: [JOIN HERE](${INVITE_URL})`,
-                inline: false
-              }
-            ],
-            ...(imageUrl ? { image: { url: imageUrl } } : {})
-          }
-        ],
-        components: [
-          {
-            type: 1,
-            components: [
-              { type: 2, style: 5, label: 'Offer', url: offerMessageUrl },
-              { type: 2, style: 5, label: "See All WTB's", url: WTB_URL }
-            ]
-          }
-        ]
+      const embedMain = {
+        title: '🔥 NEW WTB DEAL 🔥',
+        description: `**${productName}**\n${sku}\n${size}\n${brand}`,
+        color: 0xf1c40f,
+        fields: [{ name: 'Current Lowest Offer', value: `${currentLowestDisplay}`, inline: false }],
+        ...(imageUrl ? { image: { url: imageUrl } } : {})
       };
+
+      const embedLinks = {
+        color: 0xf1c40f,
+        description:
+          `The Offer link below will only work if you're already in the server, so join first & registrate as a Seller 👉 [click here](${INVITE_URL})\n\n` +
+          `Offer 👉 [click here](${offerMessageUrl})\n\n` +
+          `To see all WTB's 👉 [click here](${WTB_URL})`
+      };
+
+      const payload = { embeds: [embedMain, embedLinks] };
 
       const resp = await fetch(`${partner.webhookUrl}?wait=true`, {
         method: 'POST',
@@ -433,7 +421,7 @@ app.post('/partner-wtb', async (req, res) => {
         continue;
       }
 
-      const data = await resp.json();
+      const data = await resp.json().catch(() => ({}));
       const messageId = data.id;
 
       if (messageId) {
@@ -794,6 +782,62 @@ client.on(Events.InteractionCreate, async (interaction) => {
       } catch (e) {
         console.warn('DM confirmation failed:', e?.message || e);
       }
+    }
+
+    /* ---- RETRY OFFER BUTTON (DM) ---- */
+    if (interaction.isButton() && interaction.customId.startsWith('retry_offer:')) {
+      const parts = interaction.customId.split(':');
+      const messageId = parts[3];
+
+      // Re-open the offer modal with the same placeholder logic
+      let orderRecord = null;
+      try {
+        const recs = await base(ordersTableName)
+          .select({
+            filterByFormula: `SEARCH("${messageId}", {${ORDER_FIELD_SELLER_MSG_IDS}})`,
+            maxRecords: 1
+          })
+          .firstPage();
+        orderRecord = recs[0] || null;
+      } catch (_) {}
+
+      let offerPlaceholder = 'Enter your offer (e.g. 140)';
+      if (orderRecord) {
+        const currentLowestRaw = orderRecord.get(ORDER_FIELD_CURRENT_LOWEST_OFFER);
+        if (currentLowestRaw) offerPlaceholder = `Current Lowest Offer: ${currentLowestRaw}`;
+      }
+
+      const modal = new ModalBuilder()
+        .setCustomId(`seller_offer_modal:${messageId}`)
+        .setTitle('Enter Seller ID, VAT & Offer');
+
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId('seller_id')
+            .setLabel('Seller ID (e.g. 00001)')
+            .setStyle(TextInputStyle.Short)
+            .setRequired(true)
+        ),
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId('vat_type')
+            .setLabel('VAT Type (Margin / VAT0 / VAT21)')
+            .setStyle(TextInputStyle.Short)
+            .setRequired(true)
+        ),
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId('offer_price')
+            .setLabel('Your Offer (€)')
+            .setStyle(TextInputStyle.Short)
+            .setRequired(true)
+            .setPlaceholder(offerPlaceholder)
+        )
+      );
+
+      await interaction.showModal(modal);
+      return;
     }
   } catch (err) {
     console.error('Interaction error:', err);
