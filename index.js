@@ -450,9 +450,14 @@ app.post('/partner-wtb', async (req, res) => {
             fields: [
               {
                 name: 'Current Lowest Offer',
+                value: `${currentLowestDisplay}`,
+                inline: false
+              },
+              {
+                name: 'How to Offer',
                 value:
-                  `${currentLowestDisplay}\n\n` +
-                  `Click the "Offer" button below to go to the WTB in our server and place your offer.`,
+                  `The **Offer** button links directly to the deal in our server.\n` +
+                  `Not joined yet? Join first: https://discord.gg/Fw3gTmGt`,
                 inline: false
               }
             ],
