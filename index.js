@@ -401,7 +401,7 @@ app.post('/partner-wtb', async (req, res) => {
         color: 0xf1c40f,
         description:
           `Offer 👉 [click here](${offerMessageUrl})\n\n` +
-          `To see all WTB's 👉 [click here](${WTB_URL})\n\n`` +
+          `To see all WTB's 👉 [click here](${WTB_URL})\n\n` +
           `The Offer link above will only work if you're already in the server, so join first & registrate as a Seller 👉 [click here](${INVITE_URL})`
       };
 
