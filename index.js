@@ -15,8 +15,10 @@ import {
   TextInputBuilder,
   TextInputStyle,
   Events,
-  PermissionsBitField
+  PermissionsBitField,
+  MessageFlags
 } from 'discord.js';
+
 
 /* ---------------- ENV CONFIG ---------------- */
 
@@ -47,6 +49,11 @@ const dealsChannelIds = String(DISCORD_DEALS_CHANNEL_ID)
 // ---------------- Brand → channel routing (WTB) ----------------
 
 const WTB_DEFAULT_CHANNEL_ID = process.env.WTB_DEFAULT_CHANNEL_ID || dealsChannelIds[0];
+if (!WTB_DEFAULT_CHANNEL_ID) {
+  console.error('❌ WTB_DEFAULT_CHANNEL_ID is missing. Set WTB_DEFAULT_CHANNEL_ID or DISCORD_DEALS_CHANNEL_ID.');
+  process.exit(1);
+}
+
 
 function safeLower(s) {
   return String(s || '').trim().toLowerCase();
@@ -614,7 +621,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       const embed = interaction.message.embeds?.[0];
       if (!embed || !embed.description) {
-        return interaction.reply({ content: '❌ Missing deal details on this message.', ephemeral: true });
+        return interaction.reply({ content: '❌ Missing deal details on this message.', flags: MessageFlags.Ephemeral })
       }
 
       const lines = embed.description.split('\n');
@@ -666,7 +673,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       await interaction.channel?.send({ content: `<@${discordUserId}>\n\n${infoMsg}` });
 
-      return interaction.reply({ content: '✅ Deal processed and instructions sent in this channel.', ephemeral: true });
+      return interaction.reply({ content: '✅ Deal processed and instructions sent in this channel.', flags: MessageFlags.Ephemeral })
     }
 
     /* ---- OFFER BUTTON ---- */
@@ -748,7 +755,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       if (!/^\d+$/.test(sellerDigits)) {
         const msg = '❌ Seller ID must be digits only.';
-        await interaction.reply({ content: msg, ephemeral: true });
+        await interaction.reply({ content: msg, flags: MessageFlags.Ephemeral })
         await safeDMWithRetry(interaction.user, `${msg}\n\nYou can try again by clicking the button below.`, retryCustomId);
         return;
       }
@@ -758,7 +765,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const vatInput = normalizeVatType(interaction.fields.getTextInputValue('vat_type').trim());
       if (!vatInput) {
         const msg = '❌ VAT Type must be one of: Margin, VAT0, VAT21.';
-        await interaction.reply({ content: msg, ephemeral: true });
+        await interaction.reply({ content: msg, flags: MessageFlags.Ephemeral })
         await safeDMWithRetry(interaction.user, `${msg}\n\nYou can try again by clicking the button below.`, retryCustomId);
         return;
       }
@@ -766,7 +773,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const offerPrice = parseFloat(interaction.fields.getTextInputValue('offer_price').replace(',', '.'));
       if (!Number.isFinite(offerPrice) || offerPrice <= 0) {
         const msg = '❌ Invalid offer price.';
-        await interaction.reply({ content: msg, ephemeral: true });
+        await interaction.reply({ content: msg, flags: MessageFlags.Ephemeral })
         await safeDMWithRetry(interaction.user, `${msg}\n\nYou can try again by clicking the button below.`, retryCustomId);
         return;
       }
@@ -802,7 +809,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
               `Your offer must be at least **€${MIN_UNDERCUT_STEP.toFixed(2)}** lower than that.\n` +
               `Max allowed for your VAT type: **${maxDisplay}${altDisplay}**.`;
 
-            await interaction.reply({ content: msg, ephemeral: true });
+            await interaction.reply({ content: msg, flags: MessageFlags.Ephemeral })
             await safeDMWithRetry(interaction.user, `${msg}\n\nYour offer was **not** saved. You can try again by clicking the button below.`, retryCustomId);
             return;
           }
@@ -817,7 +824,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const sellerRecordId = sellers[0]?.id;
       if (!sellerRecordId) {
         const msg = `❌ Seller ${sellerCode} not found.`;
-        await interaction.reply({ content: msg, ephemeral: true });
+        await interaction.reply({ content: msg, flags: MessageFlags.Ephemeral })
         await safeDMWithRetry(interaction.user, `${msg}\n\nPlease check your Seller ID and try again by clicking the button below.`, retryCustomId);
         return;
       }
@@ -837,7 +844,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       await interaction.reply({
         content: `✅ Offer submitted.\nSeller: ${sellerCode}\nOffer: €${offerPrice.toFixed(2)} (${vatInput})`,
-        ephemeral: true
+        flags: MessageFlags.Ephemeral
       });
 
       // DM confirmation
