@@ -262,7 +262,7 @@ async function disableSellerOfferMessages(orderId) {
   const targetChannelId = storedChannelId || dealsChannelIds[0];
 
   const channel = await client.channels.fetch(targetChannelId).catch(() => null);
-  if (!channel) {
+  if (!channel || !channel.isTextBased?.()) {
     console.warn(`⚠️ disableSellerOfferMessages: channel not found: ${targetChannelId}`);
     await base(ordersTableName).update(orderId, { [ORDER_FIELD_BUTTONS_DISABLED]: true }).catch(() => null);
     return;
@@ -395,7 +395,7 @@ async function sendOfferDeal(req, res) {
     const messageUrls = [];
     
     const targetChannelId = pickWTBChannelId(brand);
-    console.log(`📌 WTB create: brand="${brand || ''}" -> channelId=${targetChannelId}`);
+    console.log(`📌 WTB create: brand="${brand || ''}" -> ${channel?.name || 'unknown'} (${targetChannelId})`);
     
     const channel = await client.channels.fetch(targetChannelId).catch(() => null);
     if (!channel || !channel.isTextBased?.()) {
