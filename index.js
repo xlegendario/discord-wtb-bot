@@ -44,6 +44,51 @@ const dealsChannelIds = String(DISCORD_DEALS_CHANNEL_ID)
   .map((id) => id.trim())
   .filter(Boolean);
 
+// ---------------- Brand → channel routing (WTB) ----------------
+
+const WTB_DEFAULT_CHANNEL_ID = process.env.WTB_DEFAULT_CHANNEL_ID || dealsChannelIds[0];
+
+function safeLower(s) {
+  return String(s || '').trim().toLowerCase();
+}
+
+function normalizeBrand(brand) {
+  const b = safeLower(brand);
+  if (!b) return '';
+  if (b.includes('jordan')) return 'jordan';
+  if (b.includes('nike')) return 'nike';
+  if (b.includes('adidas')) return 'adidas';
+  if (b.includes('new balance')) return 'new balance';
+  if (b.includes('asics')) return 'asics';
+  if (b.includes('ugg')) return 'ugg';
+  return b;
+}
+
+function parseBrandChannelMap() {
+  const raw = process.env.WTB_BRAND_CHANNEL_MAP || '';
+  if (!raw) return new Map();
+
+  try {
+    const obj = JSON.parse(raw);
+    const map = new Map();
+    for (const [k, v] of Object.entries(obj || {})) {
+      if (!k || !v) continue;
+      map.set(normalizeBrand(k), String(v).trim());
+    }
+    return map;
+  } catch (e) {
+    console.warn('⚠️ WTB_BRAND_CHANNEL_MAP is not valid JSON:', e.message);
+    return new Map();
+  }
+}
+
+const WTB_BRAND_CHANNEL_MAP = parseBrandChannelMap();
+
+function pickWTBChannelId(brand) {
+  const key = normalizeBrand(brand);
+  return WTB_BRAND_CHANNEL_MAP.get(key) || WTB_DEFAULT_CHANNEL_ID;
+}
+
 // Airtable view URL for “See All WTB’s”
 const WTB_URL =
   'https://airtable.com/invite/l?inviteId=invwmhpKlD6KmJe6n&inviteToken=a14697b7435e64f6ee429f8b59fbb07bc0474aaf66c8ff59068aa5ceb2842253&utm_medium=email&utm_source=product_team&utm_content=transactional-alerts';
@@ -62,6 +107,7 @@ const partnersTableName = AIRTABLE_PARTNERS_TABLE || 'Partnerships';
 const ORDER_FIELD_SELLER_MSG_IDS = 'Seller Offer Message ID';
 const ORDER_FIELD_BUTTONS_DISABLED = 'Seller Offer Buttons Disabled';
 const ORDER_FIELD_CURRENT_LOWEST_OFFER = 'Current Lowest Offer';
+const ORDER_FIELD_WTB_CHANNEL_ID = 'WTB Channel ID';
 
 const PARTNER_FIELD_WEBHOOK_URL = 'WTB Webhook URL';
 const PARTNER_FIELD_ACTIVE = 'Active?';
@@ -204,30 +250,40 @@ async function disableSellerOfferMessages(orderId) {
   if (!order) return;
 
   const rawIds = order.get(ORDER_FIELD_SELLER_MSG_IDS);
-  if (rawIds) {
-    const msgIds = String(rawIds).split(',').map((x) => x.trim()).filter(Boolean);
+  if (!rawIds) {
+    await base(ordersTableName).update(orderId, { [ORDER_FIELD_BUTTONS_DISABLED]: true }).catch(() => null);
+    return;
+  }
 
-    for (const channelId of dealsChannelIds) {
-      const channel = await client.channels.fetch(channelId).catch(() => null);
-      if (!channel) continue;
+  const msgIds = String(rawIds).split(',').map((x) => x.trim()).filter(Boolean);
 
-      for (const id of msgIds) {
-        const msg = await channel.messages.fetch(id).catch(() => null);
-        if (!msg) continue;
+  // NEW: find the one channel where the WTB message was posted
+  const storedChannelId = order.get(ORDER_FIELD_WTB_CHANNEL_ID);
+  const targetChannelId = storedChannelId || dealsChannelIds[0];
 
-        const disabled = msg.components.map((row) =>
-          new ActionRowBuilder().addComponents(
-            ...row.components.map((btn) => ButtonBuilder.from(btn).setDisabled(true))
-          )
-        );
+  const channel = await client.channels.fetch(targetChannelId).catch(() => null);
+  if (!channel) {
+    console.warn(`⚠️ disableSellerOfferMessages: channel not found: ${targetChannelId}`);
+    await base(ordersTableName).update(orderId, { [ORDER_FIELD_BUTTONS_DISABLED]: true }).catch(() => null);
+    return;
+  }
 
-        await msg.edit({ components: disabled }).catch(() => null);
-      }
-    }
+  for (const id of msgIds) {
+    const msg = await channel.messages.fetch(id).catch(() => null);
+    if (!msg) continue;
+
+    const disabled = msg.components.map((row) =>
+      new ActionRowBuilder().addComponents(
+        ...row.components.map((btn) => ButtonBuilder.from(btn).setDisabled(true))
+      )
+    );
+
+    await msg.edit({ components: disabled }).catch(() => null);
   }
 
   await base(ordersTableName).update(orderId, { [ORDER_FIELD_BUTTONS_DISABLED]: true }).catch(() => null);
 }
+
 
 /* ---------------- Update "Current Lowest Offer" in your server embeds ---------------- */
 
@@ -243,34 +299,43 @@ async function updateLowestOfferDisplays(orderId) {
   const rawInternalIds = order.get(ORDER_FIELD_SELLER_MSG_IDS);
   if (!rawInternalIds) return;
 
-  const msgIds = String(rawInternalIds).split(',').map((x) => x.trim()).filter(Boolean);
+  const msgIds = String(rawInternalIds)
+    .split(',')
+    .map((x) => x.trim())
+    .filter(Boolean);
 
-  for (const channelId of dealsChannelIds) {
-    const channel = await client.channels.fetch(channelId).catch(() => null);
-    if (!channel) continue;
+  // find the one channel where the WTB message was posted
+  const storedChannelId = order.get(ORDER_FIELD_WTB_CHANNEL_ID);
+  const targetChannelId = storedChannelId || dealsChannelIds[0];
 
-    for (const id of msgIds) {
-      const msg = await channel.messages.fetch(id).catch(() => null);
-      if (!msg || !msg.embeds?.length) continue;
+  const channel = await client.channels.fetch(targetChannelId).catch(() => null);
+  if (!channel || !channel.isTextBased?.()) {
+    console.warn(`⚠️ updateLowestOfferDisplays: channel not found or not text-based: ${targetChannelId}`);
+    return;
+  }
 
-      const oldEmbed = msg.embeds[0];
-      const newEmbed = EmbedBuilder.from(oldEmbed);
+  for (const id of msgIds) {
+    const msg = await channel.messages.fetch(id).catch(() => null);
+    if (!msg || !msg.embeds?.length) continue;
 
-      const existingFields = Array.isArray(newEmbed.data?.fields) ? newEmbed.data.fields : [];
-      const filteredFields = existingFields.filter((f) => f.name !== 'Current Lowest Offer');
+    const oldEmbed = msg.embeds[0];
+    const newEmbed = EmbedBuilder.from(oldEmbed);
 
-      filteredFields.push({
-        name: 'Current Lowest Offer',
-        value: `${currentLowestDisplay}\n\nClick below to submit your offer.`,
-        inline: false
-      });
+    const existingFields = Array.isArray(newEmbed.data?.fields) ? newEmbed.data.fields : [];
+    const filteredFields = existingFields.filter((f) => f.name !== 'Current Lowest Offer');
 
-      newEmbed.setFields(filteredFields);
+    filteredFields.push({
+      name: 'Current Lowest Offer',
+      value: `${currentLowestDisplay}\n\nClick below to submit your offer.`,
+      inline: false
+    });
 
-      await msg.edit({ embeds: [newEmbed] }).catch(() => null);
-    }
+    newEmbed.setFields(filteredFields);
+
+    await msg.edit({ embeds: [newEmbed] }).catch(() => null);
   }
 }
+
 
 /* ---------------- Helper: get active partners ---------------- */
 
@@ -328,30 +393,34 @@ async function sendOfferDeal(req, res) {
 
     const messageIds = [];
     const messageUrls = [];
-
-    for (const channelId of dealsChannelIds) {
-      const channel = await client.channels.fetch(channelId).catch(() => null);
-      if (!channel) continue;
-
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('seller_offer').setLabel('Offer').setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setLabel("See All WTB's").setStyle(ButtonStyle.Link).setURL(WTB_URL)
-      );
-
-      const msg = await channel.send({ embeds: [embed], components: [row] });
-
-      messageIds.push(msg.id);
-      messageUrls.push(msg.url);
+    
+    const targetChannelId = pickWTBChannelId(brand);
+    console.log(`📌 WTB create: brand="${brand || ''}" -> channelId=${targetChannelId}`);
+    
+    const channel = await client.channels.fetch(targetChannelId).catch(() => null);
+    if (!channel || !channel.isTextBased?.()) {
+      return res.status(404).json({ error: `WTB channel not found or not text-based: ${targetChannelId}` });
     }
+    
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('seller_offer').setLabel('Offer').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setLabel("See All WTB's").setStyle(ButtonStyle.Link).setURL(WTB_URL)
+    );
+    
+    const msg = await channel.send({ embeds: [embed], components: [row] });
+    
+    messageIds.push(msg.id);
+    messageUrls.push(msg.url);
 
     if (recordId) {
       const updateFields = {
-        [ORDER_FIELD_SELLER_MSG_IDS]: messageIds.join(','),
-        [ORDER_FIELD_BUTTONS_DISABLED]: false
+        [ORDER_FIELD_SELLER_MSG_IDS]: messageIds.join(','), // still fine (will be 1 id)
+        [ORDER_FIELD_BUTTONS_DISABLED]: false,
+        [ORDER_FIELD_WTB_CHANNEL_ID]: targetChannelId
       };
-
+    
       if (messageUrls.length > 0) updateFields['Offer Message URL'] = messageUrls[0];
-
+    
       await base(ordersTableName).update(recordId, updateFields);
     }
 
