@@ -395,12 +395,17 @@ async function sendOfferDeal(req, res) {
     const messageUrls = [];
     
     const targetChannelId = pickWTBChannelId(brand);
-    console.log(`📌 WTB create: brand="${brand || ''}" -> ${channel?.name || 'unknown'} (${targetChannelId})`);
+    console.log(`📌 WTB create: brand="${brand || ''}" -> channelId=${targetChannelId}`);
     
     const channel = await client.channels.fetch(targetChannelId).catch(() => null);
     if (!channel || !channel.isTextBased?.()) {
-      return res.status(404).json({ error: `WTB channel not found or not text-based: ${targetChannelId}` });
+      return res.status(404).json({
+        error: `WTB channel not found or not text-based: ${targetChannelId}`
+      });
     }
+    
+    console.log(`✅ WTB channel resolved: #${channel.name} (${channel.id})`);
+
     
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId('seller_offer').setLabel('Offer').setStyle(ButtonStyle.Success),
