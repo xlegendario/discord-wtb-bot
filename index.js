@@ -98,7 +98,7 @@ function pickWTBChannelId(brand) {
 
 // Airtable view URL for “See All WTB’s”
 const WTB_URL =
-  'https://airtable.com/invite/l?inviteId=invwmhpKlD6KmJe6n&inviteToken=a14697b7435e64f6ee429f8b59fbb07bc0474aaf66c8ff59068aa5ceb2842253&utm_medium=email&utm_source=product_team&utm_content=transactional-alerts';
+  'https://kickzcaviar.com/dl/7d831a';
 
 const INVITE_URL = 'https://discord.gg/Fw3gTmGt';
 
