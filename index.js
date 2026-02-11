@@ -118,7 +118,8 @@ const ORDER_FIELD_WTB_CHANNEL_ID = 'WTB Channel ID';
 
 const PARTNER_FIELD_WEBHOOK_URL = 'WTB Webhook URL';
 const PARTNER_FIELD_ACTIVE = 'Active?';
-const PARTNER_FIELD_WTB_MESSAGES = 'Partner WTB Messages';
+const PARTNER_FIELD_INVITE_URL = 'Invite URL';
+const PARTNER_FIELD_LAST_POST_AT = 'Last Post At';
 
 /* ---------------- Utilities ---------------- */
 
@@ -355,11 +356,12 @@ async function getActivePartners() {
 
   return records.map((rec) => ({
     id: rec.id,
-    name: rec.get('Name'),
-    webhookUrl: rec.get(PARTNER_FIELD_WEBHOOK_URL),
-    messagesLog: rec.get(PARTNER_FIELD_WTB_MESSAGES) || ''
-  }));
+    name: rec.get('Name') || rec.id,
+    webhookUrl: String(rec.get(PARTNER_FIELD_WEBHOOK_URL) || '').trim(),
+    inviteUrl: String(rec.get(PARTNER_FIELD_INVITE_URL) || '').trim(), // ✅ NEW
+  })).filter(p => !!p.webhookUrl);
 }
+
 
 /* ---------------- Express API ---------------- */
 
@@ -455,68 +457,53 @@ app.post('/partner-wtb', async (req, res) => {
 
     if (!recordId) return res.status(400).json({ error: 'recordId is required' });
 
+    // Optional: keep this if you want to ensure record exists
     const order = await base(ordersTableName).find(recordId).catch(() => null);
     if (!order) return res.status(404).json({ error: 'Order not found in Airtable' });
 
-    const offerMessageUrl = order.get('Offer Message URL');
-    if (!offerMessageUrl) return res.status(400).json({ error: 'Offer Message URL is empty for this order' });
-
-    const currentLowestRaw = order.get(ORDER_FIELD_CURRENT_LOWEST_OFFER);
-    const currentLowestDisplay = currentLowestRaw ? String(currentLowestRaw) : 'No offers yet';
-
     const partners = await getActivePartners();
-    if (!partners.length) return res.json({ ok: true, message: 'No active partners found' });
+    if (!partners.length) return res.json({ ok: true, message: 'No active partners found', sent: [] });
 
     const sentByPartner = [];
 
     for (const partner of partners) {
-      const embedMain = {
-        title: '🔥 NEW WTB DEAL 🔥',
-        description: `**${productName}**\n${sku}\n${size}\n${brand}`,
-        color: 0xf1c40f,
-        fields: [{ name: 'Current Lowest Offer', value: `${currentLowestDisplay}`, inline: false }],
-        ...(imageUrl ? { image: { url: imageUrl } } : {})
-      };
-
-      const embedLinks = {
+      const joinUrl = partner.inviteUrl || INVITE_URL;
+    
+      const embed = {
+        title: '🔥 NEW WTB 🔥',
         color: 0xf1c40f,
         description:
-          `Offer 👉 [click here](${offerMessageUrl})\n\n` +
-          `To see all WTB's 👉 [click here](${WTB_URL})\n\n` +
-          `The Offer link above will only work if you're already in the server, so join first & registrate as a Seller 👉 [click here](${INVITE_URL})`
+          `**${productName || '-'}**\n` +
+          `SKU: ${sku || '-'}\n` +
+          `Size: ${size || '-'}\n` +
+          `Brand: ${brand || '-'}\n\n` +
+          `Join 👉 [click here](${joinUrl})`,
+        ...(imageUrl ? { image: { url: imageUrl } } : {})
       };
-
-      const payload = { embeds: [embedMain, embedLinks] };
-
+    
+      const payload = { embeds: [embed] };
+    
       const resp = await fetch(`${partner.webhookUrl}?wait=true`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       }).catch((err) => {
-        console.error('Error sending partner webhook:', err);
+        console.error(`Error sending partner webhook (${partner.name}):`, err);
         return null;
       });
-
+    
       if (!resp || !resp.ok) {
-        console.warn(`Failed sending WTB to partner ${partner.name}`);
+        console.warn(`⚠️ Failed sending WTB to partner ${partner.name} (${partner.id})`);
         continue;
       }
-
-      const data = await resp.json().catch(() => ({}));
-      const messageId = data.id;
-
-      if (messageId) {
-        sentByPartner.push({ partnerId: partner.id, messageId });
-
-        const prevLog = partner.messagesLog || '';
-        const newLine = `${recordId}:${messageId}`;
-        const updatedLog = prevLog ? `${prevLog}\n${newLine}` : newLine;
-
-        await base(partnersTableName).update(partner.id, { [PARTNER_FIELD_WTB_MESSAGES]: updatedLog }).catch(() => null);
-      }
+    
+      // ✅ Success: store timestamp
+      await base(partnersTableName)
+        .update(partner.id, { [PARTNER_FIELD_LAST_POST_AT]: new Date().toISOString() })
+        .catch(() => null);
     }
 
-    return res.json({ ok: true, sent: sentByPartner });
+    return res.json({ ok: true });
   } catch (err) {
     console.error('Error in /partner-wtb:', err);
     return res.status(500).json({ error: 'Internal error' });
