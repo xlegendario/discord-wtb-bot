@@ -477,7 +477,7 @@ app.post('/partner-wtb', async (req, res) => {
           `SKU: ${sku || '-'}\n` +
           `Size: ${size || '-'}\n` +
           `Brand: ${brand || '-'}\n\n` +
-          `**Join server:** 👉 [click here](${joinUrl})`,
+          `**Sell Now:** [click here](${joinUrl})`,
         ...(imageUrl ? { image: { url: imageUrl } } : {})
       };
     
