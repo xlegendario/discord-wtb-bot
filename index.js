@@ -472,13 +472,20 @@ app.post('/partner-wtb', async (req, res) => {
       const embed = {
         title: '🔥 NEW WTB 🔥',
         color: 0xffed00,
+        thumbnail: {
+          url: 'https://i.imgur.com/gRmfHif.png'
+        },
         description:
           `**${productName || '-'}**\n` +
           `SKU: ${sku || '-'}\n` +
           `Size: ${size || '-'}\n` +
           `Brand: ${brand || '-'}\n\n` +
           `**Sell Now:** [click here](${joinUrl})`,
-        ...(imageUrl ? { image: { url: imageUrl } } : {})
+        ...(imageUrl ? { image: { url: imageUrl } } : {}),
+        footer: {
+          text: 'Kickz Caviar',
+          icon_url: 'https://i.imgur.com/gRmfHif.png'
+        }
       };
     
       const payload = { embeds: [embed] };
