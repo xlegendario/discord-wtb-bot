@@ -732,136 +732,146 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     /* ---- OFFER MODAL SUBMISSION ---- */
     if (interaction.isModalSubmit() && interaction.customId.startsWith('seller_offer_modal:')) {
-      const [, messageId] = interaction.customId.split(':');
-
-      let orderRecord = null;
+      // ✅ ACK FAST to prevent 10062
+      await interaction.deferReply({ ephemeral: true }).catch(() => null);
+    
       try {
-        const recs = await base(ordersTableName)
-          .select({
-            filterByFormula: `SEARCH("${messageId}", {${ORDER_FIELD_SELLER_MSG_IDS}})`,
-            maxRecords: 1
-          })
-          .firstPage();
-        orderRecord = recs[0] || null;
-      } catch (_) {}
-
-      const orderId = orderRecord?.id || null;
-
-      const sellerDigits = interaction.fields.getTextInputValue('seller_id').trim();
-      const retryCustomId =
-        interaction.guildId && interaction.channelId
-          ? `retry_offer:${interaction.guildId}:${interaction.channelId}:${messageId}`
-          : null;
-
-      if (!/^\d+$/.test(sellerDigits)) {
-        const msg = '❌ Seller ID must be digits only.';
-        await interaction.reply({ content: msg, flags: MessageFlags.Ephemeral })
-        await safeDMWithRetry(interaction.user, `${msg}\n\nYou can try again by clicking the button below.`, retryCustomId);
-        return;
-      }
-
-      const sellerCode = `SE-${sellerDigits}`;
-
-      const vatInput = normalizeVatType(interaction.fields.getTextInputValue('vat_type').trim());
-      if (!vatInput) {
-        const msg = '❌ VAT Type must be one of: Margin, VAT0, VAT21.';
-        await interaction.reply({ content: msg, flags: MessageFlags.Ephemeral })
-        await safeDMWithRetry(interaction.user, `${msg}\n\nYou can try again by clicking the button below.`, retryCustomId);
-        return;
-      }
-
-      const offerPrice = parseFloat(interaction.fields.getTextInputValue('offer_price').replace(',', '.'));
-      if (!Number.isFinite(offerPrice) || offerPrice <= 0) {
-        const msg = '❌ Invalid offer price.';
-        await interaction.reply({ content: msg, flags: MessageFlags.Ephemeral })
-        await safeDMWithRetry(interaction.user, `${msg}\n\nYou can try again by clicking the button below.`, retryCustomId);
-        return;
-      }
-
-      const normalizedOffer = getNormalized(offerPrice, vatInput);
-
-      // undercut logic
-      if (orderId) {
-        const lowest = await getCurrentLowest(orderId);
-        if (lowest) {
-          const maxAllowedGross = lowest.normalized - MIN_UNDERCUT_STEP;
-
-          if (normalizedOffer > maxAllowedGross + 1e-9) {
-            const lowestStr = formatLowestForDisplay(lowest);
-
-            let maxForSeller = maxAllowedGross;
-            if (vatInput === 'VAT0') maxForSeller = maxAllowedGross / 1.21;
-
-            const maxForSellerRounded = Math.floor(maxForSeller * 100) / 100;
-
-            let maxDisplay = `€${maxForSellerRounded.toFixed(2)} (${vatInput})`;
-            let altDisplay = '';
-
-            if (vatInput === 'VAT0') {
-              altDisplay = ` / ≈€${(maxForSellerRounded * 1.21).toFixed(2)} (Margin)`;
-            } else if (vatInput === 'VAT21') {
-              altDisplay = ` / ≈€${(maxForSellerRounded / 1.21).toFixed(2)} (VAT0)`;
+        const [, messageId] = interaction.customId.split(':');
+    
+        let orderRecord = null;
+        try {
+          const recs = await base(ordersTableName)
+            .select({
+              filterByFormula: `SEARCH("${messageId}", {${ORDER_FIELD_SELLER_MSG_IDS}})`,
+              maxRecords: 1
+            })
+            .firstPage();
+          orderRecord = recs[0] || null;
+        } catch (_) {}
+    
+        const orderId = orderRecord?.id || null;
+    
+        const sellerDigits = interaction.fields.getTextInputValue('seller_id').trim();
+        const retryCustomId =
+          interaction.guildId && interaction.channelId
+            ? `retry_offer:${interaction.guildId}:${interaction.channelId}:${messageId}`
+            : null;
+    
+        if (!/^\d+$/.test(sellerDigits)) {
+          const msg = '❌ Seller ID must be digits only.';
+          await interaction.editReply({ content: msg }).catch(() => null);
+          await safeDMWithRetry(interaction.user, `${msg}\n\nYou can try again by clicking the button below.`, retryCustomId);
+          return;
+        }
+    
+        const sellerCode = `SE-${sellerDigits}`;
+    
+        const vatInput = normalizeVatType(interaction.fields.getTextInputValue('vat_type').trim());
+        if (!vatInput) {
+          const msg = '❌ VAT Type must be one of: Margin, VAT0, VAT21.';
+          await interaction.editReply({ content: msg }).catch(() => null);
+          await safeDMWithRetry(interaction.user, `${msg}\n\nYou can try again by clicking the button below.`, retryCustomId);
+          return;
+        }
+    
+        const offerPrice = parseFloat(interaction.fields.getTextInputValue('offer_price').replace(',', '.'));
+        if (!Number.isFinite(offerPrice) || offerPrice <= 0) {
+          const msg = '❌ Invalid offer price.';
+          await interaction.editReply({ content: msg }).catch(() => null);
+          await safeDMWithRetry(interaction.user, `${msg}\n\nYou can try again by clicking the button below.`, retryCustomId);
+          return;
+        }
+    
+        const normalizedOffer = getNormalized(offerPrice, vatInput);
+    
+        // undercut logic
+        if (orderId) {
+          const lowest = await getCurrentLowest(orderId);
+          if (lowest) {
+            const maxAllowedGross = lowest.normalized - MIN_UNDERCUT_STEP;
+    
+            if (normalizedOffer > maxAllowedGross + 1e-9) {
+              const lowestStr = formatLowestForDisplay(lowest);
+    
+              let maxForSeller = maxAllowedGross;
+              if (vatInput === 'VAT0') maxForSeller = maxAllowedGross / 1.21;
+    
+              const maxForSellerRounded = Math.floor(maxForSeller * 100) / 100;
+    
+              let maxDisplay = `€${maxForSellerRounded.toFixed(2)} (${vatInput})`;
+              let altDisplay = '';
+    
+              if (vatInput === 'VAT0') {
+                altDisplay = ` / ≈€${(maxForSellerRounded * 1.21).toFixed(2)} (Margin)`;
+              } else if (vatInput === 'VAT21') {
+                altDisplay = ` / ≈€${(maxForSellerRounded / 1.21).toFixed(2)} (VAT0)`;
+              }
+    
+              const msg =
+                `❌ Offer too high.\n` +
+                `Current lowest: **${lowestStr}**\n` +
+                `Your offer must be at least **€${MIN_UNDERCUT_STEP.toFixed(2)}** lower than that.\n` +
+                `Max allowed for your VAT type: **${maxDisplay}${altDisplay}**.`;
+    
+              await interaction.editReply({ content: msg }).catch(() => null);
+              await safeDMWithRetry(interaction.user, `${msg}\n\nYour offer was **not** saved. You can try again by clicking the button below.`, retryCustomId);
+              return;
             }
-
-            const msg =
-              `❌ Offer too high.\n` +
-              `Current lowest: **${lowestStr}**\n` +
-              `Your offer must be at least **€${MIN_UNDERCUT_STEP.toFixed(2)}** lower than that.\n` +
-              `Max allowed for your VAT type: **${maxDisplay}${altDisplay}**.`;
-
-            await interaction.reply({ content: msg, flags: MessageFlags.Ephemeral })
-            await safeDMWithRetry(interaction.user, `${msg}\n\nYour offer was **not** saved. You can try again by clicking the button below.`, retryCustomId);
-            return;
           }
         }
-      }
-
-      // lookup seller
-      const sellers = await base(sellersTableName)
-        .select({ filterByFormula: `{Seller ID} = "${sellerCode}"`, maxRecords: 1 })
-        .firstPage();
-
-      const sellerRecordId = sellers[0]?.id;
-      if (!sellerRecordId) {
-        const msg = `❌ Seller ${sellerCode} not found.`;
-        await interaction.reply({ content: msg, flags: MessageFlags.Ephemeral })
-        await safeDMWithRetry(interaction.user, `${msg}\n\nPlease check your Seller ID and try again by clicking the button below.`, retryCustomId);
+    
+        // lookup seller
+        const sellers = await base(sellersTableName)
+          .select({ filterByFormula: `{Seller ID} = "${sellerCode}"`, maxRecords: 1 })
+          .firstPage();
+    
+        const sellerRecordId = sellers[0]?.id;
+        if (!sellerRecordId) {
+          const msg = `❌ Seller ${sellerCode} not found.`;
+          await interaction.editReply({ content: msg }).catch(() => null);
+          await safeDMWithRetry(interaction.user, `${msg}\n\nPlease check your Seller ID and try again by clicking the button below.`, retryCustomId);
+          return;
+        }
+    
+        const fields = {
+          'Seller Offer': offerPrice,
+          'Offer VAT Type': vatInput,
+          'Offer Cost (Normalized)': normalizedOffer,
+          'Offer Date': new Date().toISOString().split('T')[0],
+          'Seller ID': [sellerRecordId],
+          'Seller Discord ID': interaction.user.id
+        };
+    
+        if (orderId) fields['Linked Orders'] = [orderId];
+    
+        await base(sellerOffersTableName).create(fields);
+    
+        await interaction.editReply({
+          content: `✅ Offer submitted.\nSeller: ${sellerCode}\nOffer: €${offerPrice.toFixed(2)} (${vatInput})`
+        }).catch(() => null);
+    
+        // DM confirmation
+        try {
+          const dmRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setLabel('Go To WTB').setStyle(ButtonStyle.Link).setURL(WTB_URL)
+          );
+    
+          await interaction.user.send({
+            content:
+              `Hi ${interaction.user}, your offer has been placed successfully.\n` +
+              `If your offer gets accepted, we'll open a private channel with you to confirm the deal.\n\n` +
+              `In the meantime you can keep an eye on our WTB page to see if your offer is still the lowest:`,
+            components: [dmRow]
+          });
+        } catch (e) {
+          console.warn('DM confirmation failed:', e?.message || e);
+        }
+    
         return;
-      }
-
-      const fields = {
-        'Seller Offer': offerPrice,
-        'Offer VAT Type': vatInput,
-        'Offer Cost (Normalized)': normalizedOffer,
-        'Offer Date': new Date().toISOString().split('T')[0],
-        'Seller ID': [sellerRecordId],
-        'Seller Discord ID': interaction.user.id
-      };
-
-      if (orderId) fields['Linked Orders'] = [orderId];
-
-      await base(sellerOffersTableName).create(fields);
-
-      await interaction.reply({
-        content: `✅ Offer submitted.\nSeller: ${sellerCode}\nOffer: €${offerPrice.toFixed(2)} (${vatInput})`,
-        flags: MessageFlags.Ephemeral
-      });
-
-      // DM confirmation
-      try {
-        const dmRow = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setLabel('Go To WTB').setStyle(ButtonStyle.Link).setURL(WTB_URL)
-        );
-
-        await interaction.user.send({
-          content:
-            `Hi ${interaction.user}, your offer has been placed successfully.\n` +
-            `If your offer gets accepted, we'll open a private channel with you to confirm the deal.\n\n` +
-            `In the meantime you can keep an eye on our WTB page to see if your offer is still the lowest:`,
-          components: [dmRow]
-        });
-      } catch (e) {
-        console.warn('DM confirmation failed:', e?.message || e);
+      } catch (err) {
+        console.error('seller_offer_modal submit error:', err);
+        await interaction.editReply({ content: '❌ Something went wrong. Please try again.' }).catch(() => null);
+        return;
       }
     }
 
