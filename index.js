@@ -100,7 +100,7 @@ function pickWTBChannelId(brand) {
 const WTB_URL =
   'https://kickzcaviar.com/dl/7d831a';
 
-const INVITE_URL = 'https://discord.gg/Fw3gTmGt';
+const INVITE_URL = 'https://discord.gg/GZY9NBpYUS';
 
 /* ---------------- Airtable ---------------- */
 
@@ -471,13 +471,13 @@ app.post('/partner-wtb', async (req, res) => {
     
       const embed = {
         title: '🔥 NEW WTB 🔥',
-        color: 0xf1c40f,
+        color: 0xffed00,
         description:
           `**${productName || '-'}**\n` +
           `SKU: ${sku || '-'}\n` +
           `Size: ${size || '-'}\n` +
           `Brand: ${brand || '-'}\n\n` +
-          `Join 👉 [click here](${joinUrl})`,
+          `**Join server:** 👉 [click here](${joinUrl})`,
         ...(imageUrl ? { image: { url: imageUrl } } : {})
       };
     
