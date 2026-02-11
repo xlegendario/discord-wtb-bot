@@ -473,7 +473,7 @@ app.post('/partner-wtb', async (req, res) => {
         title: '🔥 NEW WTB 🔥',
         color: 0xffed00,
         thumbnail: {
-          url: 'https://i.imgur.com/gRmfHif.png'
+          url: 'https://i.imgur.com/JOFvdG2.png'
         },
         description:
           `**${productName || '-'}**\n` +
@@ -483,8 +483,8 @@ app.post('/partner-wtb', async (req, res) => {
           `**Sell Now:** [click here](${joinUrl})`,
         ...(imageUrl ? { image: { url: imageUrl } } : {}),
         footer: {
-          text: 'Kickz Caviar',
-          icon_url: 'https://i.imgur.com/gRmfHif.png'
+          text: '© 2026 Kickz Caviar — All rights reserved',
+          icon_url: 'https://i.imgur.com/JOFvdG2.png'
         }
       };
     
