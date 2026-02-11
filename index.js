@@ -483,8 +483,7 @@ app.post('/partner-wtb', async (req, res) => {
           `**Sell Now:** [click here](${joinUrl})`,
         ...(imageUrl ? { image: { url: imageUrl } } : {}),
         footer: {
-          text: '© 2026 Kickz Caviar — All rights reserved',
-          icon_url: 'https://i.imgur.com/JOFvdG2.png'
+          text: '© 2026 Kickz Caviar — All rights reserved'
         }
       };
     
