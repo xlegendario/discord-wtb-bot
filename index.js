@@ -831,13 +831,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
           'Offer VAT Type': vatInput,
           'Offer Cost (Normalized)': normalizedOffer,
           'Offer Date': new Date().toISOString().split('T')[0],
-          'Seller ID': [sellerRecordId],
-          'Seller Discord ID': interaction.user.id
+          'Seller ID': [sellerRecordId]
         };
-    
+        
         if (orderId) fields['Linked Orders'] = [orderId];
-    
+        
         await base(sellerOffersTableName).create(fields);
+
     
         await interaction.editReply({
           content: `✅ Offer submitted.\nSeller: ${sellerCode}\nOffer: €${offerPrice.toFixed(2)} (${vatInput})`
