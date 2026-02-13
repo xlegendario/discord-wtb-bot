@@ -825,6 +825,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
           await safeDMWithRetry(interaction.user, `${msg}\n\nPlease check your Seller ID and try again by clicking the button below.`, retryCustomId);
           return;
         }
+
+        // OPTIONAL: store/refresh Discord ID on the Seller record (editable field!)
+        const SELLER_DISCORD_ID_FIELD = 'Discord User ID';
+
+        const existing = sellers[0]?.get?.(SELLER_DISCORD_ID_FIELD) || null;
+        if (!existing) {
+          await base(sellersTableName)
+            .update(sellerRecordId, { [SELLER_DISCORD_ID_FIELD]: interaction.user.id })
+            .catch(() => null);
+        }
+
     
         const fields = {
           'Seller Offer': offerPrice,
