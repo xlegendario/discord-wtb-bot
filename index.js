@@ -655,20 +655,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       const finalPayout = Number.isFinite(payload.payout) ? payload.payout : null;
       const payoutLine = finalPayout !== null ? `Final payout: €${finalPayout.toFixed(2)}` : 'Final payout: see deal details above';
-
-      const infoMsg =
-        `✅ Deal processed!\n\n` +
-        `💶\n${payoutLine}\n\n` +
-        `📦\nWhen you are ready to ship, click **Request Label** below.\n\n` +
-        `📬\nPlease prepare the package and ensure it is packed in a clean, unbranded box with no unnecessary stickers or markings. REMOVE ANY PRICETAGS!\n\n` +
-        `❌\nDo not include anything inside the box, as this is not a standard deal.\n\n` +
-        `📸\nPlease pack it as professionally as possible. If you're unsure, feel free to take a photo of the package and share it here before shipping.`;
-      const requestLabelRow = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId(`request_label_wtb:${orderId}`)
-          .setLabel('Request Label')
-          .setStyle(ButtonStyle.Primary)
-      );
       
       const embed = new EmbedBuilder()
         .setTitle('📦 Ready to Ship')
@@ -718,8 +704,24 @@ client.on(Events.InteractionCreate, async (interaction) => {
             .setDisabled(true)
         );
     
+        const existingRows = interaction.message.components || [];
+
+        const newRows = existingRows.map((row) =>
+          new ActionRowBuilder().addComponents(
+            ...row.components.map((btn) => {
+              if (btn.customId?.startsWith('request_label_wtb:')) {
+                return ButtonBuilder.from(btn)
+                  .setDisabled(true)
+                  .setLabel('Label Requested')
+                  .setStyle(ButtonStyle.Secondary);
+              }
+              return btn;
+            })
+          )
+        );
+        
         await interaction.message.edit({
-          components: [disabledRow]
+          components: newRows
         });
     
         // 👇 find Airtable record
@@ -730,9 +732,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
           })
           .firstPage();
     
+        // 👇 find Airtable record
         const record = records[0];
         if (!record) throw new Error(`Order ${orderId} not found`);
-    
+        
+        // 👇 ADD THIS BLOCK HERE
+        if (!process.env.LOJIQ_WMS_BASE_URL) {
+          throw new Error('LOJIQ_WMS_BASE_URL is missing');
+        }
+        
         // 👇 call WMS
         const response = await fetch(`${process.env.LOJIQ_WMS_BASE_URL}/api/request-label`, {
           method: 'POST',
