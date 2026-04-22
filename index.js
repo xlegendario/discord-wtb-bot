@@ -678,6 +678,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
           }
         )
         .setFooter({ text: 'Kickz Caviar' });
+
+      const requestLabelRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`request_label_wtb:${orderId}`)
+          .setLabel('Request Label')
+          .setStyle(ButtonStyle.Primary)
+      );
       
       await interaction.channel?.send({
         content: `<@${discordUserId}>`,
@@ -694,15 +701,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
       try {
         // 👇 VERY IMPORTANT: acknowledge fast (prevents double click errors)
         await interaction.deferUpdate();
-    
-        // 👇 disable button immediately (prevents spam)
-        const disabledRow = new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setCustomId(`request_label_wtb:${orderId}`)
-            .setLabel('Label Requested')
-            .setStyle(ButtonStyle.Secondary)
-            .setDisabled(true)
-        );
     
         const existingRows = interaction.message.components || [];
 
