@@ -664,9 +664,84 @@ client.on(Events.InteractionCreate, async (interaction) => {
         `❌\nDo not include anything inside the box, as this is not a standard deal.\n\n` +
         `📸\nPlease pack it as professionally as possible. If you're unsure, feel free to take a photo of the package and share it here before shipping.`;
 
-      await interaction.channel?.send({ content: `<@${discordUserId}>\n\n${infoMsg}` });
+      const requestLabelRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`request_label_wtb:${orderId}`)
+          .setLabel('Request Label')
+          .setStyle(ButtonStyle.Primary)
+      );
+      
+      await interaction.channel?.send({
+        content: `<@${discordUserId}>\n\n${infoMsg}`,
+        components: [requestLabelRow]
+      });
 
       return interaction.reply({ content: '✅ Deal processed and instructions sent in this channel.', flags: MessageFlags.Ephemeral })
+    }
+
+    if (interaction.isButton() && interaction.customId.startsWith('request_label_wtb:')) {
+      const orderId = interaction.customId.split(':')[1];
+    
+      try {
+        // 👇 VERY IMPORTANT: acknowledge fast (prevents double click errors)
+        await interaction.deferUpdate();
+    
+        // 👇 disable button immediately (prevents spam)
+        const disabledRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId(`request_label_wtb:${orderId}`)
+            .setLabel('Label Requested')
+            .setStyle(ButtonStyle.Secondary)
+            .setDisabled(true)
+        );
+    
+        await interaction.message.edit({
+          components: [disabledRow]
+        });
+    
+        // 👇 find Airtable record
+        const records = await base(ordersTableName)
+          .select({
+            filterByFormula: `{Order ID} = "${orderId}"`,
+            maxRecords: 1
+          })
+          .firstPage();
+    
+        const record = records[0];
+        if (!record) throw new Error(`Order ${orderId} not found`);
+    
+        // 👇 call WMS
+        const response = await fetch(`${process.env.LOJIQ_WMS_BASE_URL}/api/request-label`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            source: 'wtb',
+            record_id: record.id
+          })
+        });
+    
+        const data = await response.json().catch(() => ({}));
+    
+        if (!response.ok) {
+          throw new Error(data.details || data.error || 'Failed to request label');
+        }
+    
+        // 👇 confirmation message (THIS FIXES YOUR ISSUE)
+        await interaction.followUp({
+          content: `✅ Label request received. We’ll process it shortly.`,
+          flags: MessageFlags.Ephemeral
+        });
+    
+      } catch (err) {
+        console.error('WTB label request failed:', err);
+    
+        await interaction.followUp({
+          content: `❌ ${err.message}`,
+          flags: MessageFlags.Ephemeral
+        }).catch(() => null);
+      }
+    
+      return;
     }
 
     /* ---- OFFER BUTTON ---- */
