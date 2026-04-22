@@ -659,11 +659,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const infoMsg =
         `✅ Deal processed!\n\n` +
         `💶\n${payoutLine}\n\n` +
-        `📦\nThe shipping label will be sent shortly.\n\n` +
+        `📦\nWhen you are ready to ship, click **Request Label** below.\n\n` +
         `📬\nPlease prepare the package and ensure it is packed in a clean, unbranded box with no unnecessary stickers or markings. REMOVE ANY PRICETAGS!\n\n` +
         `❌\nDo not include anything inside the box, as this is not a standard deal.\n\n` +
         `📸\nPlease pack it as professionally as possible. If you're unsure, feel free to take a photo of the package and share it here before shipping.`;
-
       const requestLabelRow = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
           .setCustomId(`request_label_wtb:${orderId}`)
@@ -671,8 +670,32 @@ client.on(Events.InteractionCreate, async (interaction) => {
           .setStyle(ButtonStyle.Primary)
       );
       
+      const embed = new EmbedBuilder()
+        .setTitle('📦 Ready to Ship')
+        .setColor(0x2ecc71)
+        .addFields(
+          {
+            name: '💶 Payout',
+            value: payoutLine,
+            inline: false
+          },
+          {
+            name: '📦 Next Step',
+            value: 'Click **Request Label** when you are ready to ship.',
+            inline: false
+          },
+          {
+            name: '📬 Packaging Instructions',
+            value:
+              'Use a clean, unbranded box.\nRemove all price tags.\nNo extra items inside.',
+            inline: false
+          }
+        )
+        .setFooter({ text: 'Kickz Caviar' });
+      
       await interaction.channel?.send({
-        content: `<@${discordUserId}>\n\n${infoMsg}`,
+        content: `<@${discordUserId}>`,
+        embeds: [embed],
         components: [requestLabelRow]
       });
 
