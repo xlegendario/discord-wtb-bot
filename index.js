@@ -656,7 +656,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const finalPayout = Number.isFinite(payload.payout) ? payload.payout : null;
       const payoutLine = finalPayout !== null ? `Final payout: €${finalPayout.toFixed(2)}` : 'Final payout: see deal details above';
       
-      const embed = new EmbedBuilder()
+      const readyEmbed = new EmbedBuilder()
         .setTitle('📦 Ready to Ship')
         .setColor(0x2ecc71)
         .addFields(
@@ -688,7 +688,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       
       await interaction.channel?.send({
         content: `<@${discordUserId}>`,
-        embeds: [embed],
+        embeds: [readyEmbed],
         components: [requestLabelRow]
       });
 
