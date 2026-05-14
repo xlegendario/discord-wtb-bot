@@ -599,7 +599,9 @@ app.post('/seller-offer/place-from-portal', async (req, res) => {
 
         return res.status(400).json({
           error: 'Offer is too high.',
-          details: `Your offer must be €${maxForSellerRounded} or lower for ${normalizedVatType}.`
+          details:
+            `Offers must undercut the current lowest offer by at least €2.50.\n` +
+            `Max allowed offer: €${maxForSellerRounded} (${normalizedVatType}).`
         });
       }
     }
