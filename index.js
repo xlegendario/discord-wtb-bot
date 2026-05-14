@@ -516,6 +516,122 @@ app.post('/partner-wtb', async (req, res) => {
   }
 });
 
+/* ---------------- POST /seller-offer/place-from-portal ---------------- */
+
+app.post('/seller-offer/place-from-portal', async (req, res) => {
+  try {
+    const {
+      orderRecordId,
+      sellerRecordId,
+      offerAmount,
+      vatType
+    } = req.body || {};
+
+    if (!orderRecordId) {
+      return res.status(400).json({ error: 'Missing orderRecordId' });
+    }
+
+    if (!sellerRecordId) {
+      return res.status(400).json({ error: 'Missing sellerRecordId' });
+    }
+
+    const normalizedVatType = normalizeVatType(String(vatType || '').trim());
+
+    if (!normalizedVatType) {
+      return res.status(400).json({
+        error: 'VAT Type must be one of: Margin, VAT0, VAT21.'
+      });
+    }
+
+    const offerPrice = parseNumeric(offerAmount);
+
+    if (!Number.isFinite(offerPrice) || offerPrice <= 0) {
+      return res.status(400).json({
+        error: 'Invalid offer amount.'
+      });
+    }
+
+    const orderRecord = await base(ordersTableName).find(orderRecordId).catch(() => null);
+
+    if (!orderRecord) {
+      return res.status(404).json({
+        error: 'Order not found.'
+      });
+    }
+
+    const sellerRecord = await base(sellersTableName).find(sellerRecordId).catch(() => null);
+
+    if (!sellerRecord) {
+      return res.status(404).json({
+        error: 'Seller not found.'
+      });
+    }
+
+    const fulfillmentStatus = String(orderRecord.get('Fulfillment Status') || '').trim();
+
+    if (fulfillmentStatus !== 'Outsource') {
+      return res.status(409).json({
+        error: 'This order is no longer open for offers.'
+      });
+    }
+
+    const normalizedOffer = getNormalized(offerPrice, normalizedVatType);
+
+    if (!Number.isFinite(normalizedOffer)) {
+      return res.status(400).json({
+        error: 'Could not normalize offer amount.'
+      });
+    }
+
+    const lowest = await getCurrentLowest(orderRecordId);
+
+    if (lowest) {
+      const maxAllowedGross = lowest.normalized - MIN_UNDERCUT_STEP;
+
+      if (normalizedOffer > maxAllowedGross + 1e-9) {
+        let maxForSeller = maxAllowedGross;
+
+        if (normalizedVatType === 'VAT0') {
+          maxForSeller = maxAllowedGross / 1.21;
+        }
+
+        const maxForSellerRounded = Math.floor(maxForSeller * 100) / 100;
+
+        return res.status(400).json({
+          error: 'Offer is too high.',
+          details: `Your offer must be €${maxForSellerRounded.toFixed(2)} or lower for ${normalizedVatType}.`
+        });
+      }
+    }
+
+    const fields = {
+      'Seller Offer': offerPrice,
+      'Offer VAT Type': normalizedVatType,
+      'Offer Cost (Normalized)': normalizedOffer,
+      'Offer Date': new Date().toISOString().split('T')[0],
+      'Seller ID': [sellerRecord.id],
+      'Linked Orders': [orderRecord.id]
+    };
+
+    const createdOffer = await base(sellerOffersTableName).create(fields);
+
+    return res.json({
+      ok: true,
+      offerRecordId: createdOffer.id,
+      offerAmount: offerPrice,
+      vatType: normalizedVatType,
+      normalizedOffer
+    });
+  } catch (err) {
+    console.error('Portal offer submit failed:', err);
+
+    return res.status(500).json({
+      error: 'Offer submit failed.',
+      details: err.message
+    });
+  }
+});
+
 /* ---------------- POST /seller-offer/disable ---------------- */
 
 app.post('/seller-offer/disable', async (req, res) => {
