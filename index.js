@@ -302,7 +302,11 @@ async function updateLowestOfferDisplays(orderId) {
   if (!order) return;
 
   const currentLowestRaw = order.get(ORDER_FIELD_CURRENT_LOWEST_OFFER);
-  const currentLowestDisplay = currentLowestRaw ? String(currentLowestRaw) : 'No offers yet';
+  const currentLowestNumber = parseNumeric(currentLowestRaw);
+  
+  const currentLowestDisplay = Number.isFinite(currentLowestNumber)
+    ? `€${Math.floor(currentLowestNumber)}`
+    : 'No offers yet';
 
   const rawInternalIds = order.get(ORDER_FIELD_SELLER_MSG_IDS);
   if (!rawInternalIds) return;
@@ -384,7 +388,13 @@ async function sendOfferDeal(req, res) {
       const order = await base(ordersTableName).find(recordId).catch(() => null);
       if (order) {
         const rawLowest = order.get(ORDER_FIELD_CURRENT_LOWEST_OFFER);
-        if (rawLowest) currentLowestDisplay = String(rawLowest);
+        if (rawLowest) {
+          const rawLowestNumber = parseNumeric(rawLowest);
+        
+          if (Number.isFinite(rawLowestNumber)) {
+            currentLowestDisplay = `€${Math.floor(rawLowestNumber)}`;
+          }
+        }
       }
     }
 
