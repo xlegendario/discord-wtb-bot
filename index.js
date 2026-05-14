@@ -595,11 +595,11 @@ app.post('/seller-offer/place-from-portal', async (req, res) => {
           maxForSeller = maxAllowedGross / 1.21;
         }
 
-        const maxForSellerRounded = Math.floor(maxForSeller * 100) / 100;
+        const maxForSellerRounded = Math.floor(maxForSeller);
 
         return res.status(400).json({
           error: 'Offer is too high.',
-          details: `Your offer must be €${maxForSellerRounded.toFixed(2)} or lower for ${normalizedVatType}.`
+          details: `Your offer must be €${maxForSellerRounded} or lower for ${normalizedVatType}.`
         });
       }
     }
@@ -1009,16 +1009,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
               let maxForSeller = maxAllowedGross;
               if (vatInput === 'VAT0') maxForSeller = maxAllowedGross / 1.21;
     
-              const maxForSellerRounded = Math.floor(maxForSeller * 100) / 100;
-    
-              let maxDisplay = `€${maxForSellerRounded.toFixed(2)} (${vatInput})`;
-              let altDisplay = '';
-    
-              if (vatInput === 'VAT0') {
-                altDisplay = ` / ≈€${(maxForSellerRounded * 1.21).toFixed(2)} (Margin)`;
-              } else if (vatInput === 'VAT21') {
-                altDisplay = ` / ≈€${(maxForSellerRounded / 1.21).toFixed(2)} (VAT0)`;
-              }
+              const maxForSellerRounded = Math.floor(maxForSeller);
+
+              const maxDisplay = `€${maxForSellerRounded} (${vatInput})`;
+              const altDisplay = '';
     
               const msg =
                 `❌ Offer too high.\n` +
