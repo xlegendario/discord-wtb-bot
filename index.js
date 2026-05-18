@@ -1091,14 +1091,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
             }
           }
         }
-    
-        const sellerRecordId = sellers[0]?.id;
-        if (!sellerRecordId) {
-          const msg = `❌ Seller ${sellerCode} not found.`;
-          await interaction.editReply({ content: msg }).catch(() => null);
-          await safeDMWithRetry(interaction.user, `${msg}\n\nPlease check your Seller ID and try again by clicking the button below.`, retryCustomId);
-          return;
-        }
 
         // OPTIONAL: store/refresh Discord ID on the Seller record (editable field!)
         const SELLER_DISCORD_ID_FIELD = 'Discord User ID';
