@@ -211,7 +211,7 @@ client.login(DISCORD_TOKEN);
 
 /* ---------------- Lowest offer calculation ---------------- */
 
-async function getCurrentLowest(orderId) {
+async function getCurrentLowest(orderId, excludeOfferRecordId = null) {
   if (!orderId) return null;
 
   const offers = await base(sellerOffersTableName).select().all();
@@ -219,6 +219,7 @@ async function getCurrentLowest(orderId) {
   let best = null;
 
   for (const rec of offers) {
+    if (excludeOfferRecordId && rec.id === excludeOfferRecordId) continue;
     const links = rec.get('Linked Orders');
     if (!Array.isArray(links)) continue;
 
@@ -249,6 +250,31 @@ async function getCurrentLowest(orderId) {
   if (!Number.isFinite(maxPrice)) return null;
 
   return { normalized: maxPrice, raw: maxPrice, vatType: 'Margin' };
+}
+
+async function findExistingSellerOffer(orderId, sellerRecordId) {
+  if (!orderId || !sellerRecordId) return null;
+
+  const offers = await base(sellerOffersTableName).select().all();
+
+  return offers.find((rec) => {
+    const linkedOrders = rec.get('Linked Orders');
+    const linkedSellers = rec.get('Seller ID');
+
+    const matchesOrder =
+      Array.isArray(linkedOrders) &&
+      linkedOrders.some((item) =>
+        typeof item === 'string' ? item === orderId : item?.id === orderId
+      );
+
+    const matchesSeller =
+      Array.isArray(linkedSellers) &&
+      linkedSellers.some((item) =>
+        typeof item === 'string' ? item === sellerRecordId : item?.id === sellerRecordId
+      );
+
+    return matchesOrder && matchesSeller;
+  }) || null;
 }
 
 /* ---------------- Disable messages (your server) ---------------- */
@@ -593,7 +619,9 @@ app.post('/seller-offer/place-from-portal', async (req, res) => {
       });
     }
 
-    const lowest = await getCurrentLowest(orderRecordId);
+    const existingOffer = await findExistingSellerOffer(orderRecord.id, sellerRecord.id);
+
+    const lowest = await getCurrentLowest(orderRecordId, existingOffer?.id || null);
 
     if (lowest) {
       const maxAllowedGross = lowest.normalized - MIN_UNDERCUT_STEP;
@@ -625,11 +653,18 @@ app.post('/seller-offer/place-from-portal', async (req, res) => {
       'Linked Orders': [orderRecord.id]
     };
 
-    const createdOffer = await base(sellerOffersTableName).create(fields);
+    let savedOffer;
 
+    if (existingOffer) {
+      savedOffer = await base(sellerOffersTableName).update(existingOffer.id, fields);
+    } else {
+      savedOffer = await base(sellerOffersTableName).create(fields);
+    }
+    
     return res.json({
       ok: true,
-      offerRecordId: createdOffer.id,
+      action: existingOffer ? 'updated' : 'created',
+      offerRecordId: savedOffer.id,
       offerAmount: offerPrice,
       vatType: normalizedVatType,
       normalizedOffer
@@ -1008,10 +1043,28 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
     
         const normalizedOffer = getNormalized(offerPrice, vatInput);
+
+        // lookup seller before validation so we can prevent duplicate offers
+        const sellers = await base(sellersTableName)
+          .select({ filterByFormula: `{Seller ID} = "${sellerCode}"`, maxRecords: 1 })
+          .firstPage();
+        
+        const sellerRecordId = sellers[0]?.id;
+        
+        if (!sellerRecordId) {
+          const msg = `❌ Seller ${sellerCode} not found.`;
+          await interaction.editReply({ content: msg }).catch(() => null);
+          await safeDMWithRetry(interaction.user, `${msg}\n\nPlease check your Seller ID and try again by clicking the button below.`, retryCustomId);
+          return;
+        }
+        
+        const existingOffer = orderId
+          ? await findExistingSellerOffer(orderId, sellerRecordId)
+          : null;
     
         // undercut logic
         if (orderId) {
-          const lowest = await getCurrentLowest(orderId);
+          const lowest = await getCurrentLowest(orderId, existingOffer?.id || null);
           if (lowest) {
             const maxAllowedGross = lowest.normalized - MIN_UNDERCUT_STEP;
     
@@ -1038,11 +1091,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
             }
           }
         }
-    
-        // lookup seller
-        const sellers = await base(sellersTableName)
-          .select({ filterByFormula: `{Seller ID} = "${sellerCode}"`, maxRecords: 1 })
-          .firstPage();
     
         const sellerRecordId = sellers[0]?.id;
         if (!sellerRecordId) {
@@ -1073,11 +1121,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
         
         if (orderId) fields['Linked Orders'] = [orderId];
         
-        await base(sellerOffersTableName).create(fields);
+        if (existingOffer) {
+          await base(sellerOffersTableName).update(existingOffer.id, fields);
+        } else {
+          await base(sellerOffersTableName).create(fields);
+        }
 
     
         await interaction.editReply({
-          content: `✅ Offer submitted.\nSeller: ${sellerCode}\nOffer: €${offerPrice.toFixed(2)} (${vatInput})`
+          content: `✅ Offer ${existingOffer ? 'updated' : 'submitted'}.\nSeller: ${sellerCode}\nOffer: €${offerPrice.toFixed(2)} (${vatInput})`
         }).catch(() => null);
     
         // DM confirmation
