@@ -163,16 +163,16 @@ function formatLowestForDisplay(lowest) {
   let displayType = lowest.vatType;
   if (lowest.vatType === 'VAT21') displayType = 'Margin';
 
-  const baseStr = `€${lowest.raw.toFixed(2)}${displayType ? ` (${displayType})` : ''}`;
+  const baseStr = `€${Math.floor(lowest.raw)}${displayType ? ` (${displayType})` : ''}`;
 
   if (lowest.vatType === 'VAT21') {
     const asVat0 = lowest.raw / 1.21;
-    return `${baseStr} / €${asVat0.toFixed(2)} (VAT0)`;
+    return `${baseStr} / €${Math.floor(asVat0)} (VAT0)`;
   }
 
   if (lowest.vatType === 'VAT0') {
     const asMargin = lowest.raw * 1.21;
-    return `${baseStr} / €${asMargin.toFixed(2)} (Margin)`;
+    return `${baseStr} / €${Math.floor(asMargin)} (Margin)`;
   }
 
   return baseStr;
@@ -1121,7 +1121,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     
         await interaction.editReply({
-          content: `✅ Offer ${existingOffer ? 'updated' : 'submitted'}.\nSeller: ${sellerCode}\nOffer: €${offerPrice.toFixed(2)} (${vatInput})`
+          content: `✅ Offer ${existingOffer ? 'updated' : 'submitted'}.\nSeller: ${sellerCode}\nOffer: €${Math.floor(offerPrice)} (${vatInput})`
         }).catch(() => null);
     
         // DM confirmation
