@@ -30,6 +30,7 @@ const {
   AIRTABLE_SELLER_OFFERS_TABLE,
   AIRTABLE_SELLERS_TABLE,
   AIRTABLE_ORDERS_TABLE,
+  AIRTABLE_MEMBER_WTBS_TABLE,
   AIRTABLE_PARTNERS_TABLE,
   PAYOUT_CATEGORY_ID,
   PROCESS_DEAL_WEBHOOK_URL,
@@ -109,12 +110,51 @@ const base = new Airtable({ apiKey: AIRTABLE_API_KEY }).base(AIRTABLE_BASE_ID);
 const sellerOffersTableName = AIRTABLE_SELLER_OFFERS_TABLE || 'Seller Offers';
 const sellersTableName = AIRTABLE_SELLERS_TABLE || 'Sellers Database';
 const ordersTableName = AIRTABLE_ORDERS_TABLE || 'Unfulfilled Orders Log';
+const memberWtbsTableName = AIRTABLE_MEMBER_WTBS_TABLE || 'Member WTBs';
 const partnersTableName = AIRTABLE_PARTNERS_TABLE || 'Partnerships';
 
 const ORDER_FIELD_SELLER_MSG_IDS = 'Seller Offer Message ID';
 const ORDER_FIELD_BUTTONS_DISABLED = 'Seller Offer Buttons Disabled';
 const ORDER_FIELD_CURRENT_LOWEST_OFFER = 'Current Lowest Offer';
 const ORDER_FIELD_WTB_CHANNEL_ID = 'WTB Channel ID';
+
+const SELLER_OFFERS_FIELD_LINKED_MEMBER_WTBS = 'Linked Member WTBs';
+
+function normalizeSourceType(sourceType) {
+  return sourceType === 'member_wtb' ? 'member_wtb' : 'order';
+}
+
+function getSourceConfig(sourceType) {
+  const clean = normalizeSourceType(sourceType);
+
+  if (clean === 'member_wtb') {
+    return {
+      sourceType: 'member_wtb',
+      tableName: memberWtbsTableName,
+      linkedOfferField: SELLER_OFFERS_FIELD_LINKED_MEMBER_WTBS,
+      currentLowestField: 'Current Lowest Offer',
+      lowestOfferField: 'Lowest Offer',
+      messageIdField: ORDER_FIELD_SELLER_MSG_IDS,
+      buttonsDisabledField: ORDER_FIELD_BUTTONS_DISABLED,
+      channelIdField: ORDER_FIELD_WTB_CHANNEL_ID
+    };
+  }
+
+  return {
+    sourceType: 'order',
+    tableName: ordersTableName,
+    linkedOfferField: 'Linked Orders',
+    currentLowestField: ORDER_FIELD_CURRENT_LOWEST_OFFER,
+    lowestOfferField: null,
+    messageIdField: ORDER_FIELD_SELLER_MSG_IDS,
+    buttonsDisabledField: ORDER_FIELD_BUTTONS_DISABLED,
+    channelIdField: ORDER_FIELD_WTB_CHANNEL_ID
+  };
+}
+
+function getSourceTable(sourceType) {
+  return base(getSourceConfig(sourceType).tableName);
+}
 
 const PARTNER_FIELD_WEBHOOK_URL = 'WTB Webhook URL';
 const PARTNER_FIELD_ACTIVE = 'Active?';
@@ -211,25 +251,31 @@ client.login(DISCORD_TOKEN);
 
 /* ---------------- Lowest offer calculation ---------------- */
 
-async function getCurrentLowest(orderId, excludeOfferRecordId = null) {
-  if (!orderId) return null;
+async function getCurrentLowest(sourceType, recordId, excludeOfferRecordId = null) {
+  if (!recordId) return null;
 
+  const config = getSourceConfig(sourceType);
   const offers = await base(sellerOffersTableName).select().all();
 
   let best = null;
 
   for (const rec of offers) {
     if (excludeOfferRecordId && rec.id === excludeOfferRecordId) continue;
-    const links = rec.get('Linked Orders');
+
+    const links = rec.get(config.linkedOfferField);
     if (!Array.isArray(links)) continue;
 
-    const matches = links.some((l) => (typeof l === 'string' ? l === orderId : l?.id === orderId));
+    const matches = links.some((l) =>
+      typeof l === 'string' ? l === recordId : l?.id === recordId
+    );
+
     if (!matches) continue;
 
     const price = parseNumeric(rec.get('Seller Offer'));
     const vatRaw = rec.get('Offer VAT Type');
     const vat = typeof vatRaw === 'string' ? vatRaw : vatRaw?.name;
     const vatNorm = normalizeVatType(vat);
+
     if (!price) continue;
 
     const normalized = getNormalized(price, vatNorm);
@@ -242,29 +288,32 @@ async function getCurrentLowest(orderId, excludeOfferRecordId = null) {
 
   if (best) return best;
 
-  // Fallback: if there are no offers yet, use order's Maximum Buying Price as baseline
-  const order = await base(ordersTableName).find(orderId).catch(() => null);
-  if (!order) return null;
+  const record = await getSourceTable(sourceType).find(recordId).catch(() => null);
+  if (!record) return null;
 
-  const maxPrice = parseNumeric(order.get('Maximum Buying Price'));
+  const maxPrice =
+    parseNumeric(record.get('Maximum Buying Price')) ??
+    parseNumeric(record.get('Max Price'));
+
   if (!Number.isFinite(maxPrice)) return null;
 
   return { normalized: maxPrice, raw: maxPrice, vatType: 'Margin' };
 }
 
-async function findExistingSellerOffer(orderId, sellerRecordId) {
-  if (!orderId || !sellerRecordId) return null;
+async function findExistingSellerOffer(sourceType, recordId, sellerRecordId) {
+  if (!recordId || !sellerRecordId) return null;
 
+  const config = getSourceConfig(sourceType);
   const offers = await base(sellerOffersTableName).select().all();
 
   return offers.find((rec) => {
-    const linkedOrders = rec.get('Linked Orders');
+    const linkedRecords = rec.get(config.linkedOfferField);
     const linkedSellers = rec.get('Seller ID');
 
-    const matchesOrder =
-      Array.isArray(linkedOrders) &&
-      linkedOrders.some((item) =>
-        typeof item === 'string' ? item === orderId : item?.id === orderId
+    const matchesRecord =
+      Array.isArray(linkedRecords) &&
+      linkedRecords.some((item) =>
+        typeof item === 'string' ? item === recordId : item?.id === recordId
       );
 
     const matchesSeller =
@@ -273,7 +322,7 @@ async function findExistingSellerOffer(orderId, sellerRecordId) {
         typeof item === 'string' ? item === sellerRecordId : item?.id === sellerRecordId
       );
 
-    return matchesOrder && matchesSeller;
+    return matchesRecord && matchesSeller;
   }) || null;
 }
 
@@ -406,14 +455,25 @@ app.get('/', (_req, res) => res.send('WTB Seller Offers Bot OK'));
 
 async function sendOfferDeal(req, res) {
   try {
-    const { productName, sku, size, brand, imageUrl, recordId } = req.body || {};
+    const {
+      productName,
+      sku,
+      size,
+      brand,
+      imageUrl,
+      recordId,
+      sourceType = 'order'
+    } = req.body || {};
+    
+    const cleanSourceType = normalizeSourceType(sourceType);
+    const config = getSourceConfig(cleanSourceType);
 
     // Read current lowest from the order (for initial embed)
     let currentLowestDisplay = 'No offers yet';
     if (recordId) {
-      const order = await base(ordersTableName).find(recordId).catch(() => null);
+      const order = await getSourceTable(cleanSourceType).find(recordId).catch(() => null);
       if (order) {
-        const rawLowest = order.get(ORDER_FIELD_CURRENT_LOWEST_OFFER);
+        const rawLowest = order.get(config.currentLowestField);
         if (rawLowest) {
           const rawLowestNumber = parseNumeric(rawLowest);
         
@@ -453,7 +513,10 @@ async function sendOfferDeal(req, res) {
 
     
     const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('seller_offer').setLabel('Offer').setStyle(ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId(`seller_offer:${cleanSourceType}:${recordId}`)
+        .setLabel('Offer')
+        .setStyle(ButtonStyle.Success),
       new ButtonBuilder().setLabel("See All WTB's").setStyle(ButtonStyle.Link).setURL(WTB_URL)
     );
     
@@ -464,14 +527,14 @@ async function sendOfferDeal(req, res) {
 
     if (recordId) {
       const updateFields = {
-        [ORDER_FIELD_SELLER_MSG_IDS]: messageIds.join(','), // still fine (will be 1 id)
-        [ORDER_FIELD_BUTTONS_DISABLED]: false,
-        [ORDER_FIELD_WTB_CHANNEL_ID]: targetChannelId
+        [config.messageIdField]: messageIds.join(','),
+        [config.buttonsDisabledField]: false,
+        [config.channelIdField]: targetChannelId
       };
     
       if (messageUrls.length > 0) updateFields['Offer Message URL'] = messageUrls[0];
     
-      await base(ordersTableName).update(recordId, updateFields);
+      await getSourceTable(cleanSourceType).update(recordId, updateFields);
     }
 
     return res.json({ ok: true, messageIds, messageUrls });
@@ -937,8 +1000,23 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     /* ---- OFFER BUTTON ---- */
-    if (interaction.isButton() && interaction.customId === 'seller_offer') {
+    if (
+      interaction.isButton() &&
+      (
+        interaction.customId === 'seller_offer' ||
+        interaction.customId.startsWith('seller_offer:')
+      )
+    ) {
       const messageId = interaction.message.id;
+    
+      let sourceType = 'order';
+      let sourceRecordId = null;
+    
+      if (interaction.customId.startsWith('seller_offer:')) {
+        const parts = interaction.customId.split(':');
+        sourceType = normalizeSourceType(parts[1]);
+        sourceRecordId = parts[2] || null;
+      }
 
       let orderRecord = null;
       try {
@@ -958,7 +1036,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       const modal = new ModalBuilder()
-        .setCustomId(`seller_offer_modal:${messageId}`)
+        .setCustomId(`seller_offer_modal:${sourceType}:${sourceRecordId || ''}:${messageId}`)
         .setTitle('Enter Seller ID, VAT & Offer');
 
       modal.addComponents(
@@ -996,20 +1074,36 @@ client.on(Events.InteractionCreate, async (interaction) => {
       await interaction.deferReply({ ephemeral: true }).catch(() => null);
     
       try {
-        const [, messageId] = interaction.customId.split(':');
+        const modalParts = interaction.customId.split(':');
+
+        let sourceType = 'order';
+        let orderId = null;
+        let messageId = null;
+        
+        if (modalParts.length >= 4) {
+          sourceType = normalizeSourceType(modalParts[1]);
+          orderId = modalParts[2] || null;
+          messageId = modalParts[3];
+        } else {
+          messageId = modalParts[1];
+        }
     
         let orderRecord = null;
-        try {
-          const recs = await base(ordersTableName)
-            .select({
-              filterByFormula: `SEARCH("${messageId}", {${ORDER_FIELD_SELLER_MSG_IDS}})`,
-              maxRecords: 1
-            })
-            .firstPage();
-          orderRecord = recs[0] || null;
-        } catch (_) {}
-    
-        const orderId = orderRecord?.id || null;
+
+        if (!orderId) {
+          try {
+            const recs = await base(ordersTableName)
+              .select({
+                filterByFormula: `SEARCH("${messageId}", {${ORDER_FIELD_SELLER_MSG_IDS}})`,
+                maxRecords: 1
+              })
+              .firstPage();
+        
+            orderRecord = recs[0] || null;
+          } catch (_) {}
+        
+          orderId = orderRecord?.id || null;
+        }
     
         const sellerDigits = interaction.fields.getTextInputValue('seller_id').trim();
         const retryCustomId =
@@ -1059,12 +1153,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
         
         const existingOffer = orderId
-          ? await findExistingSellerOffer(orderId, sellerRecordId)
+          ? await findExistingSellerOffer(sourceType, orderId, sellerRecordId)
           : null;
     
         // undercut logic
         if (orderId) {
-          const lowest = await getCurrentLowest(orderId, existingOffer?.id || null);
+          const lowest = await getCurrentLowest(sourceType, orderId, existingOffer?.id || null);
           if (lowest) {
             const maxAllowedGross = lowest.normalized - MIN_UNDERCUT_STEP;
     
@@ -1111,12 +1205,31 @@ client.on(Events.InteractionCreate, async (interaction) => {
           'Seller ID': [sellerRecordId]
         };
         
-        if (orderId) fields['Linked Orders'] = [orderId];
+        if (orderId) {
+          fields[getSourceConfig(sourceType).linkedOfferField] = [orderId];
+        }
         
         if (existingOffer) {
           await base(sellerOffersTableName).update(existingOffer.id, fields);
         } else {
           await base(sellerOffersTableName).create(fields);
+        }
+
+        if (orderId) {
+          const config = getSourceConfig(sourceType);
+          const lowestAfterSave = await getCurrentLowest(sourceType, orderId);
+        
+          if (lowestAfterSave && Number.isFinite(lowestAfterSave.raw)) {
+            const updateFields = {
+              [config.currentLowestField]: lowestAfterSave.raw
+            };
+        
+            if (config.lowestOfferField) {
+              updateFields[config.lowestOfferField] = lowestAfterSave.raw;
+            }
+        
+            await getSourceTable(sourceType).update(orderId, updateFields);
+          }
         }
 
     
