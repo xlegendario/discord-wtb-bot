@@ -292,6 +292,7 @@ async function getCurrentLowest(sourceType, recordId, excludeOfferRecordId = nul
   if (!record) return null;
 
   const maxPrice =
+    parseNumeric(record.get('Current Lowest Source Price')) ??
     parseNumeric(record.get('Maximum Buying Price')) ??
     parseNumeric(record.get('Max Price'));
 
