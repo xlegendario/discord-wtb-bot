@@ -34,6 +34,9 @@ const {
   AIRTABLE_PARTNERS_TABLE,
   PAYOUT_CATEGORY_ID,
   PROCESS_DEAL_WEBHOOK_URL,
+  MEMBER_WTB_CATEGORY_ID,
+  KC_PORTAL_BASE_URL,
+  KC_PORTAL_SECRET,
   PORT = 10000
 } = process.env;
 
@@ -171,6 +174,42 @@ function normalizeVatType(raw) {
   if (raw === 'VAT0') return 'VAT0';
   if (raw === 'VAT21') return 'VAT21';
   return null;
+}
+
+function isVatTypeAllowedForMemberWtbFilter(filter, vatType) {
+  const cleanFilter = String(filter || '').trim();
+
+  if (cleanFilter === 'B2B Only') {
+    return vatType === 'VAT0' || vatType === 'VAT21';
+  }
+
+  if (cleanFilter === 'Margin Only' || cleanFilter === 'Private Only') {
+    return vatType === 'Margin';
+  }
+
+  return ['Margin', 'VAT0', 'VAT21'].includes(vatType);
+}
+
+function getAllowedVatTypesText(filter) {
+  const cleanFilter = String(filter || '').trim();
+
+  if (cleanFilter === 'B2B Only') return 'VAT0 or VAT21';
+  if (cleanFilter === 'Margin Only' || cleanFilter === 'Private Only') return 'Margin';
+
+  return 'Margin, VAT0 or VAT21';
+}
+
+function isMemberWtbAutoAccept(record) {
+  return record?.get?.('Auto Accept Seller Offers?') === true;
+}
+
+function sanitizeChannelName(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 90);
 }
 
 function parseNumeric(value) {
@@ -329,13 +368,14 @@ async function findExistingSellerOffer(sourceType, recordId, sellerRecordId) {
 
 /* ---------------- Disable messages (your server) ---------------- */
 
-async function disableSellerOfferMessages(orderId) {
-  const order = await base(ordersTableName).find(orderId).catch(() => null);
+async function disableSellerOfferMessages(recordId, sourceType = 'order') {
+  const config = getSourceConfig(sourceType);
+  const order = await getSourceTable(sourceType).find(recordId).catch(() => null);
   if (!order) return;
 
   const rawIds = order.get(ORDER_FIELD_SELLER_MSG_IDS);
   if (!rawIds) {
-    await base(ordersTableName).update(orderId, { [ORDER_FIELD_BUTTONS_DISABLED]: true }).catch(() => null);
+    await getSourceTable(sourceType).update(recordId, { [ORDER_FIELD_BUTTONS_DISABLED]: true }).catch(() => null);
     return;
   }
 
@@ -348,7 +388,7 @@ async function disableSellerOfferMessages(orderId) {
   const channel = await client.channels.fetch(targetChannelId).catch(() => null);
   if (!channel || !channel.isTextBased?.()) {
     console.warn(`⚠️ disableSellerOfferMessages: channel not found: ${targetChannelId}`);
-    await base(ordersTableName).update(orderId, { [ORDER_FIELD_BUTTONS_DISABLED]: true }).catch(() => null);
+    await getSourceTable(sourceType).update(recordId, { [ORDER_FIELD_BUTTONS_DISABLED]: true }).catch(() => null);
     return;
   }
 
@@ -365,7 +405,7 @@ async function disableSellerOfferMessages(orderId) {
     await msg.edit({ components: disabled }).catch(() => null);
   }
 
-  await base(ordersTableName).update(orderId, { [ORDER_FIELD_BUTTONS_DISABLED]: true }).catch(() => null);
+  await getSourceTable(sourceType).update(recordId, { [ORDER_FIELD_BUTTONS_DISABLED]: true }).catch(() => null);
 }
 
 
@@ -624,8 +664,12 @@ app.post('/seller-offer/place-from-portal', async (req, res) => {
       orderRecordId,
       sellerRecordId,
       offerAmount,
-      vatType
+      vatType,
+      sourceType = 'order'
     } = req.body || {};
+    
+    const cleanSourceType = normalizeSourceType(sourceType);
+    const config = getSourceConfig(cleanSourceType);
 
     if (!orderRecordId) {
       return res.status(400).json({ error: 'Missing orderRecordId' });
@@ -651,12 +695,23 @@ app.post('/seller-offer/place-from-portal', async (req, res) => {
       });
     }
 
-    const orderRecord = await base(ordersTableName).find(orderRecordId).catch(() => null);
+    const orderRecord = await getSourceTable(cleanSourceType).find(orderRecordId).catch(() => null);
 
     if (!orderRecord) {
       return res.status(404).json({
         error: 'Order not found.'
       });
+    }
+
+    if (cleanSourceType === 'member_wtb') {
+      const buyingFilter = String(orderRecord.get('Buying Inventory Filter') || '').trim();
+    
+      if (!isVatTypeAllowedForMemberWtbFilter(buyingFilter, normalizedVatType)) {
+        return res.status(400).json({
+          error: `This buyer does not accept ${normalizedVatType} offers for this WTB.`,
+          details: `Allowed VAT type: ${getAllowedVatTypesText(buyingFilter)}.`
+        });
+      }
     }
 
     const sellerRecord = await base(sellersTableName).find(sellerRecordId).catch(() => null);
@@ -683,9 +738,8 @@ app.post('/seller-offer/place-from-portal', async (req, res) => {
       });
     }
 
-    const existingOffer = await findExistingSellerOffer(orderRecord.id, sellerRecord.id);
-
-    const lowest = await getCurrentLowest(orderRecordId, existingOffer?.id || null);
+    const existingOffer = await findExistingSellerOffer(cleanSourceType, orderRecord.id, sellerRecord.id);
+    const lowest = await getCurrentLowest(cleanSourceType, orderRecordId, existingOffer?.id || null);
 
     if (lowest) {
       const maxAllowedGross = lowest.normalized - MIN_UNDERCUT_STEP;
@@ -714,7 +768,7 @@ app.post('/seller-offer/place-from-portal', async (req, res) => {
       'Offer Cost (Normalized)': normalizedOffer,
       'Offer Date': new Date().toISOString().split('T')[0],
       'Seller ID': [sellerRecord.id],
-      'Linked Orders': [orderRecord.id]
+      [config.linkedOfferField]: [orderRecord.id]
     };
 
     let savedOffer;
@@ -833,9 +887,156 @@ app.post('/sync-lowest', async (req, res) => {
 
 /* ---------------- Discord Interaction Logic ---------------- */
 
+async function createMemberWtbDealChannel({
+  memberWtbRecord,
+  sellerRecord,
+  sellerOfferRecordId,
+  sellerCode,
+  discordUserId,
+  offerPrice,
+  vatType,
+  imageUrl
+}) {
+  if (!MEMBER_WTB_CATEGORY_ID) {
+    throw new Error('MEMBER_WTB_CATEGORY_ID is missing');
+  }
+
+  const category = await client.channels.fetch(MEMBER_WTB_CATEGORY_ID).catch(() => null);
+
+  if (!category || !category.guild) {
+    throw new Error('Invalid MEMBER_WTB_CATEGORY_ID');
+  }
+
+  const guild = category.guild;
+
+  await guild.members.fetch(discordUserId).catch(() => null);
+
+  const memberWtbId =
+    memberWtbRecord.get('Member WTB ID') ||
+    memberWtbRecord.get('WTB ID') ||
+    memberWtbRecord.id;
+
+  const channelName = sanitizeChannelName(`member-wtb-${memberWtbId}`);
+
+  const channel = await guild.channels.create({
+    name: channelName,
+    parent: category.id,
+    permissionOverwrites: [
+      {
+        id: guild.roles.everyone,
+        deny: [PermissionsBitField.Flags.ViewChannel]
+      },
+      {
+        id: discordUserId,
+        allow: [
+          PermissionsBitField.Flags.ViewChannel,
+          PermissionsBitField.Flags.SendMessages,
+          PermissionsBitField.Flags.ReadMessageHistory,
+          PermissionsBitField.Flags.AttachFiles,
+          PermissionsBitField.Flags.EmbedLinks
+        ]
+      }
+    ]
+  });
+
+  const payoutNum = Number(offerPrice);
+
+  const embed = new EmbedBuilder()
+    .setTitle('✅ Member WTB Deal Reserved')
+    .setDescription(
+      `**Member WTB:** ${memberWtbId}\n` +
+      `**Product:** ${memberWtbRecord.get('Product Name') || '-'}\n` +
+      `**SKU:** ${memberWtbRecord.get('SKU') || '-'}\n` +
+      `**Size:** ${memberWtbRecord.get('Size') || '-'}\n` +
+      `**Brand:** ${memberWtbRecord.get('Brand') || '-'}\n` +
+      `**Payout:** €${Number.isFinite(payoutNum) ? payoutNum.toFixed(2) : '0.00'}\n` +
+      `**VAT Type:** ${vatType || '-'}\n` +
+      `**Seller:** ${sellerCode}`
+    )
+    .setColor(0xf1c40f);
+
+  if (imageUrl) embed.setImage(imageUrl);
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`process_member_wtb:${memberWtbRecord.id}:${sellerOfferRecordId}`)
+      .setLabel('Process Deal')
+      .setStyle(ButtonStyle.Primary)
+  );
+
+  const msg = await channel.send({
+    content: `<@${discordUserId}>`,
+    embeds: [embed],
+    components: [row]
+  });
+
+  return {
+    channelId: channel.id,
+    messageId: msg.id
+  };
+}
+
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
     /* ---- PROCESS DEAL BUTTON ---- */
+    if (interaction.isButton() && interaction.customId.startsWith('process_member_wtb:')) {
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => null);
+    
+      try {
+        const [, memberWtbRecordId, sellerOfferRecordId] = interaction.customId.split(':');
+    
+        if (!KC_PORTAL_BASE_URL || !KC_PORTAL_SECRET) {
+          throw new Error('KC_PORTAL_BASE_URL or KC_PORTAL_SECRET is missing');
+        }
+    
+        const response = await fetch(`${KC_PORTAL_BASE_URL}/api/member-wtb/process-seller-offer`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-kc-secret': KC_PORTAL_SECRET
+          },
+          body: JSON.stringify({
+            member_wtb_record_id: memberWtbRecordId,
+            seller_offer_record_id: sellerOfferRecordId,
+            discord_channel_id: interaction.channelId,
+            discord_message_id: interaction.message.id
+          })
+        });
+    
+        const data = await response.json().catch(() => ({}));
+    
+        if (!response.ok) {
+          throw new Error(data.details || data.error || 'Failed to process Member WTB deal');
+        }
+    
+        const disabledComponents = interaction.message.components.map((row) =>
+          new ActionRowBuilder().addComponents(
+            ...row.components.map((comp) => ButtonBuilder.from(comp).setDisabled(true))
+          )
+        );
+    
+        await interaction.message.edit({ components: disabledComponents }).catch(() => null);
+    
+        await interaction.channel?.send({
+          content: `✅ Deal processed. Inventory Unit created and Member WTB allocated.`
+        });
+    
+        await interaction.editReply({
+          content: '✅ Member WTB deal processed.'
+        }).catch(() => null);
+    
+        return;
+      } catch (err) {
+        console.error('process_member_wtb failed:', err);
+    
+        await interaction.editReply({
+          content: `❌ ${err.message}`
+        }).catch(() => null);
+    
+        return;
+      }
+    }
+    
     if (interaction.isButton() && interaction.customId.startsWith('process_payout:')) {
       const [, orderId, sellerCode, discordUserId] = interaction.customId.split(':');
 
@@ -1128,6 +1329,31 @@ client.on(Events.InteractionCreate, async (interaction) => {
           await safeDMWithRetry(interaction.user, `${msg}\n\nYou can try again by clicking the button below.`, retryCustomId);
           return;
         }
+
+        let sourceRecord = null;
+
+        if (orderId) {
+          sourceRecord = await getSourceTable(sourceType).find(orderId).catch(() => null);
+        }
+        
+        if (sourceType === 'member_wtb') {
+          if (!sourceRecord) {
+            await interaction.editReply({ content: '❌ Member WTB not found.' }).catch(() => null);
+            return;
+          }
+        
+          const buyingFilter = String(sourceRecord.get('Buying Inventory Filter') || '').trim();
+        
+          if (!isVatTypeAllowedForMemberWtbFilter(buyingFilter, vatInput)) {
+            const msg =
+              `❌ This buyer does not accept ${vatInput} offers for this WTB.\n` +
+              `Allowed VAT type: **${getAllowedVatTypesText(buyingFilter)}**.`;
+        
+            await interaction.editReply({ content: msg }).catch(() => null);
+            await safeDMWithRetry(interaction.user, `${msg}\n\nYour offer was **not** saved.`, retryCustomId);
+            return;
+          }
+        }
     
         const offerPrice = parseFloat(interaction.fields.getTextInputValue('offer_price').replace(',', '.'));
         if (!Number.isFinite(offerPrice) || offerPrice <= 0) {
@@ -1210,12 +1436,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
           fields[getSourceConfig(sourceType).linkedOfferField] = [orderId];
         }
         
-        if (existingOffer) {
-          await base(sellerOffersTableName).update(existingOffer.id, fields);
-        } else {
-          await base(sellerOffersTableName).create(fields);
-        }
+        let savedOffer;
 
+        if (existingOffer) {
+          savedOffer = await base(sellerOffersTableName).update(existingOffer.id, fields);
+        } else {
+          savedOffer = await base(sellerOffersTableName).create(fields);
+        }
+        
         if (orderId) {
           const config = getSourceConfig(sourceType);
           const lowestAfterSave = await getCurrentLowest(sourceType, orderId);
@@ -1231,6 +1459,34 @@ client.on(Events.InteractionCreate, async (interaction) => {
         
             await getSourceTable(sourceType).update(orderId, updateFields);
           }
+        }
+
+        if (sourceType === 'member_wtb' && sourceRecord && isMemberWtbAutoAccept(sourceRecord)) {
+          const result = await createMemberWtbDealChannel({
+            memberWtbRecord: sourceRecord,
+            sellerRecord: sellers[0],
+            sellerOfferRecordId: savedOffer.id,
+            sellerCode,
+            discordUserId: interaction.user.id,
+            offerPrice,
+            vatType: vatInput,
+            imageUrl: interaction.message.embeds?.[0]?.image?.url || null
+          });
+        
+          await getSourceTable(sourceType).update(orderId, {
+            'Purchase Status': 'Processing',
+            'WTB Channel ID': result.channelId
+          }).catch(() => null);
+        
+          await disableSellerOfferMessages(orderId, sourceType);
+        
+          await interaction.editReply({
+            content:
+              `✅ Your offer has been accepted automatically.\n` +
+              `A private deal channel has been created: <#${result.channelId}>`
+          }).catch(() => null);
+        
+          return;
         }
 
     
