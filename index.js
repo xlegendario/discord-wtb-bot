@@ -724,9 +724,15 @@ app.post('/seller-offer/place-from-portal', async (req, res) => {
 
     const fulfillmentStatus = String(orderRecord.get('Fulfillment Status') || '').trim();
 
-    if (fulfillmentStatus !== 'Outsource') {
+    if (cleanSourceType === 'order' && fulfillmentStatus !== 'Outsource') {
       return res.status(409).json({
         error: 'This order is no longer open for offers.'
+      });
+    }
+    
+    if (cleanSourceType === 'member_wtb' && ['Allocated', 'Fulfilled', 'Cancelled'].includes(fulfillmentStatus)) {
+      return res.status(409).json({
+        error: 'This WTB is no longer open for offers.'
       });
     }
 
@@ -800,10 +806,17 @@ app.post('/seller-offer/place-from-portal', async (req, res) => {
 /* ---------------- POST /seller-offer/disable ---------------- */
 
 app.post('/seller-offer/disable', async (req, res) => {
-  const { recordId } = req.body || {};
-  if (!recordId) return res.status(400).json({ error: 'Missing recordId' });
+  const {
+    recordId,
+    sourceType = 'order'
+  } = req.body || {};
 
-  await disableSellerOfferMessages(recordId);
+  if (!recordId) {
+    return res.status(400).json({ error: 'Missing recordId' });
+  }
+
+  await disableSellerOfferMessages(recordId, sourceType);
+
   return res.json({ ok: true });
 });
 
