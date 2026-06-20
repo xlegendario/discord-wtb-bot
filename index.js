@@ -929,7 +929,7 @@ async function createMemberWtbDealChannel({
     memberWtbRecord.get('WTB ID') ||
     memberWtbRecord.id;
 
-  const channelName = sanitizeChannelName(`member-wtb-${memberWtbId}`);
+  const channelName = sanitizeChannelName(`${memberWtbId}`);
 
   const channel = await guild.channels.create({
     name: channelName,
