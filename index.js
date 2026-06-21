@@ -993,7 +993,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
   try {
     /* ---- PROCESS DEAL BUTTON ---- */
     if (interaction.isButton() && interaction.customId.startsWith('process_member_wtb:')) {
-      await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => null);
+      await interaction.deferUpdate().catch(() => null);
     
       try {
         const [, memberWtbRecordId, sellerOfferRecordId] = interaction.customId.split(':');
@@ -1030,20 +1030,22 @@ client.on(Events.InteractionCreate, async (interaction) => {
     
         await interaction.message.edit({ components: disabledComponents }).catch(() => null);
     
+        const paymentStatus = data?.payment_gate?.status;
+
         await interaction.channel?.send({
-          content: `✅ Deal processed. Inventory Unit created and Member WTB allocated.`
+          content:
+            paymentStatus === "trusted"
+              ? "✅ Deal processed."
+              : "✅ Deal processed. Waiting for buyer to make the payment."
         });
-    
-        await interaction.editReply({
-          content: '✅ Member WTB deal processed.'
-        }).catch(() => null);
     
         return;
       } catch (err) {
         console.error('process_member_wtb failed:', err);
     
-        await interaction.editReply({
-          content: `❌ ${err.message}`
+        await interaction.followUp({
+          content: `❌ ${err.message}`,
+          flags: MessageFlags.Ephemeral
         }).catch(() => null);
     
         return;
