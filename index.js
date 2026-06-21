@@ -1464,15 +1464,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
           const lowestAfterSave = await getCurrentLowest(sourceType, orderId);
         
           if (lowestAfterSave && Number.isFinite(lowestAfterSave.raw)) {
-            const updateFields = {
-              [config.currentLowestField]: lowestAfterSave.raw
-            };
+            const updateFields = {};
         
-            if (config.lowestOfferField) {
+            // Alleen Member WTB heeft een editable Lowest Offer veld.
+            // UOL Current Lowest Offer is computed, dus NIET schrijven.
+            if (sourceType === "member_wtb" && config.lowestOfferField) {
               updateFields[config.lowestOfferField] = lowestAfterSave.raw;
             }
         
-            await getSourceTable(sourceType).update(orderId, updateFields);
+            if (Object.keys(updateFields).length) {
+              await getSourceTable(sourceType).update(orderId, updateFields);
+            }
           }
         }
 
