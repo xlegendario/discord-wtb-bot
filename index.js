@@ -1036,12 +1036,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
     
         const paymentStatus = data?.payment_gate?.status;
 
-        await interaction.channel?.send({
-          content:
-            paymentStatus === "trusted"
-              ? "✅ Deal processed."
-              : "✅ Deal processed. Waiting for buyer to make the payment."
-        });
+        if (paymentStatus !== "trusted") {
+          await interaction.channel?.send({
+            content: "✅ Deal processed. Waiting for buyer to make the payment."
+          });
+        }
     
         return;
       } catch (err) {
