@@ -983,6 +983,10 @@ async function createMemberWtbDealChannel({
     components: [row]
   });
 
+  await base(memberWtbsTableName).update(memberWtbRecord.id, {
+    "WTB Created Channel ID": channel.id
+  });
+
   return {
     channelId: channel.id,
     messageId: msg.id
