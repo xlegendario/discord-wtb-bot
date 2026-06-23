@@ -121,7 +121,7 @@ const ORDER_FIELD_BUTTONS_DISABLED = 'Seller Offer Buttons Disabled';
 const ORDER_FIELD_CURRENT_LOWEST_OFFER = 'Current Lowest Offer';
 const ORDER_FIELD_WTB_CHANNEL_ID = 'WTB Channel ID';
 
-const SELLER_OFFERS_FIELD_LINKED_MEMBER_WTBS = 'Linked Member WTBs';
+const SELLER_OFFERS_FIELD_LINKED_MEMBER_WTBS = 'Member WTBs';
 
 function normalizeSourceType(sourceType) {
   return sourceType === 'member_wtb' ? 'member_wtb' : 'order';
