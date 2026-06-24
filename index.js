@@ -1649,12 +1649,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
             imageUrl: interaction.message.embeds?.[0]?.image?.url || null
           });
         
-          await getSourceTable(sourceType).update(orderId, {
-            'Purchase Status': 'Processing',
-            'WTB Channel ID': result.channelId
-          }).catch(() => null);
-        
           await disableSellerOfferMessages(orderId, sourceType);
+
+          await getSourceTable(sourceType).update(orderId, {
+            'Fulfillment Status': 'Confirmed'
+          }).catch(() => null);
         
           await interaction.editReply({
             content:
