@@ -1416,7 +1416,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (orderId) {
           const lowest = await getCurrentLowest(sourceType, orderId, existingOffer?.id || null);
           if (lowest) {
-            const maxAllowedGross = lowest.normalized - MIN_UNDERCUT_STEP;
+            const isFirstMemberWtbOffer =
+              sourceType === 'member_wtb' &&
+              !existingOffer &&
+              parseNumeric(sourceRecord?.get('Current Lowest Offer')) === null &&
+              parseNumeric(sourceRecord?.get('Lowest Offer')) === null;
+
+            const maxAllowedGross = isFirstMemberWtbOffer
+              ? lowest.normalized
+              : lowest.normalized - MIN_UNDERCUT_STEP;
     
             if (normalizedOffer > maxAllowedGross + 1e-9) {
               const lowestStr = formatLowestForDisplay(lowest);
@@ -1432,8 +1440,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
               const msg =
                 `❌ Offer too high.\n` +
                 `Current lowest: **${lowestStr}**\n` +
-                `Your offer must be at least **€${MIN_UNDERCUT_STEP.toFixed(2)}** lower than that.\n` +
-                `Max allowed for your VAT type: **${maxDisplay}${altDisplay}**.`;
+                (
+                  isFirstMemberWtbOffer
+                    ? `Max allowed for this WTB: **${maxDisplay}${altDisplay}**.`
+                    : `Your offer must be at least **€${MIN_UNDERCUT_STEP.toFixed(2)}** lower than that.\n` +
+                      `Max allowed for your VAT type: **${maxDisplay}${altDisplay}**.`
+                );
     
               await interaction.editReply({ content: msg }).catch(() => null);
               await safeDMWithRetry(interaction.user, `${msg}\n\nYour offer was **not** saved. You can try again by clicking the button below.`, retryCustomId);
@@ -1484,8 +1496,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
               updateFields["Current Lowest Normalized"] = lowestAfterSave.normalized;
               updateFields["Current Lowest Seller Offer"] = [savedOffer.id];
         
-              updateFields["New Offer Available"] = true;
-              updateFields["Offer Sent?"] = false;
+              updateFields["New Offer Available"] = false;
+              updateFields["Offer Sent?"] = true;
         
               updateFields["Lowest Offer"] = lowestAfterSave.raw;
               updateFields["Lowest Offer Normalized"] = lowestAfterSave.normalized;
