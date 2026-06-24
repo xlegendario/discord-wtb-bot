@@ -894,6 +894,100 @@ app.post('/payout-channel', async (req, res) => {
   }
 });
 
+/* ---------------- POST member-wtb/deal-channel ---------------- */
+
+app.post('/member-wtb/deal-channel', async (req, res) => {
+  try {
+    const secret = String(req.headers['x-kc-secret'] || '').trim();
+
+    if (!KC_PORTAL_SECRET || secret !== KC_PORTAL_SECRET) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const memberWtbRecordId = String(req.body?.member_wtb_record_id || '').trim();
+    const sellerOfferRecordId = String(req.body?.seller_offer_record_id || '').trim();
+
+    if (!memberWtbRecordId || !sellerOfferRecordId) {
+      return res.status(400).json({ error: 'Missing member_wtb_record_id or seller_offer_record_id' });
+    }
+
+    const memberWtbRecord = await base(memberWtbsTableName).find(memberWtbRecordId);
+    const sellerOfferRecord = await base(sellerOffersTableName).find(sellerOfferRecordId);
+
+    if (String(memberWtbRecord.get('Fulfillment Status') || '').trim() === 'Allocated') {
+      return res.status(409).json({ error: 'Member WTB already allocated' });
+    }
+
+    const linkedWtbs = sellerOfferRecord.get(SELLER_OFFERS_FIELD_LINKED_MEMBER_WTBS) || [];
+    const isLinked = linkedWtbs.some((item) =>
+      typeof item === 'string' ? item === memberWtbRecordId : item?.id === memberWtbRecordId
+    );
+
+    if (!isLinked) {
+      return res.status(400).json({ error: 'Seller Offer is not linked to this Member WTB' });
+    }
+
+    const sellerRecordId = Array.isArray(sellerOfferRecord.get('Seller ID'))
+      ? sellerOfferRecord.get('Seller ID')[0]
+      : '';
+
+    if (!sellerRecordId) {
+      return res.status(400).json({ error: 'Seller Offer missing Seller ID' });
+    }
+
+    const sellerRecord = await base(sellersTableName).find(sellerRecordId);
+
+    const sellerCode = sellerRecord.get('Seller ID') || sellerRecordId;
+    const discordUserId = sellerRecord.get('Discord User ID');
+
+    if (!discordUserId) {
+      return res.status(400).json({ error: 'Seller missing Discord User ID' });
+    }
+
+    const offerPrice = Number(sellerOfferRecord.get('Seller Offer') || 0);
+    const vatType = sellerOfferRecord.get('Offer VAT Type') || '';
+
+    const picture = memberWtbRecord.get('Picture');
+    const imageUrl =
+      Array.isArray(picture) && picture[0]?.url
+        ? picture[0].url
+        : null;
+
+    const result = await createMemberWtbDealChannel({
+      memberWtbRecord,
+      sellerRecord,
+      sellerOfferRecordId,
+      sellerCode,
+      discordUserId,
+      offerPrice,
+      vatType,
+      imageUrl
+    });
+
+    await base(memberWtbsTableName).update(memberWtbRecordId, {
+      'Purchase Status': 'Processing',
+      'WTB Channel ID': result.channelId
+    });
+
+    await disableSellerOfferMessages(memberWtbRecordId, 'member_wtb');
+
+    return res.json({
+      ok: true,
+      member_wtb_record_id: memberWtbRecordId,
+      seller_offer_record_id: sellerOfferRecordId,
+      channel_id: result.channelId,
+      message_id: result.messageId
+    });
+  } catch (err) {
+    console.error('Failed to create Member WTB deal channel:', err);
+
+    return res.status(500).json({
+      error: 'Failed to create Member WTB deal channel',
+      details: err.message
+    });
+  }
+});
+
 /* ---------------- POST /sync-lowest ---------------- */
 
 app.post('/sync-lowest', async (req, res) => {
