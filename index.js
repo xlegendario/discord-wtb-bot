@@ -965,7 +965,6 @@ app.post('/member-wtb/deal-channel', async (req, res) => {
     });
 
     await base(memberWtbsTableName).update(memberWtbRecordId, {
-      'Purchase Status': 'Processing',
       'WTB Channel ID': result.channelId
     });
 
