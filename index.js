@@ -783,7 +783,7 @@ app.post('/seller-offer/place-from-portal', async (req, res) => {
       'Seller Offer': offerPrice,
       'Offer VAT Type': normalizedVatType,
       'Offer Cost (Normalized)': normalizedOffer,
-      'Offer Date': new Date().toISOString().split('T')[0],
+      'Offer Date': new Date().toISOString(),
       'Seller ID': [sellerRecord.id],
       [config.linkedOfferField]: [orderRecord.id]
     };
@@ -1469,7 +1469,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           'Seller Offer': offerPrice,
           'Offer VAT Type': vatInput,
           'Offer Cost (Normalized)': normalizedOffer,
-          'Offer Date': new Date().toISOString().split('T')[0],
+          'Offer Date': new Date().toISOString(),
           'Seller ID': [sellerRecordId]
         };
         
