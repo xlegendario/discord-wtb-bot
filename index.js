@@ -938,7 +938,7 @@ app.post('/member-wtb/deal-channel', async (req, res) => {
     const sellerRecord = await base(sellersTableName).find(sellerRecordId);
 
     const sellerCode = sellerRecord.get('Seller ID') || sellerRecordId;
-    const discordUserId = sellerRecord.get('Discord User ID');
+    const discordUserId = sellerRecord.get('Discord ID');
 
     if (!discordUserId) {
       return res.status(400).json({ error: 'Seller missing Discord User ID' });
