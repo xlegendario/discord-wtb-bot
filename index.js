@@ -1270,7 +1270,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         
         await interaction.message.edit({
           components: newRows
-        });
+        }).catch(() => null);
     
         // 👇 find Airtable record
         const records = await base(ordersTableName)
