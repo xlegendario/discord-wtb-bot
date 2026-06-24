@@ -1507,6 +1507,26 @@ client.on(Events.InteractionCreate, async (interaction) => {
         
             if (Object.keys(updateFields).length) {
               await getSourceTable(sourceType).update(orderId, updateFields);
+
+              if (
+                sourceType === "member_wtb" &&
+                !isMemberWtbAutoAccept(sourceRecord) &&
+                KC_PORTAL_BASE_URL &&
+                KC_PORTAL_SECRET
+              ) {
+                await fetch(`${KC_PORTAL_BASE_URL}/api/member-wtb/send-current-offer-to-buyer`, {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    "x-kc-secret": KC_PORTAL_SECRET
+                  },
+                  body: JSON.stringify({
+                    member_wtb_record_id: orderId
+                  })
+                }).catch((err) => {
+                  console.error("Failed to send current offer to buyer:", err);
+                });
+              }
             }
           }
         }
