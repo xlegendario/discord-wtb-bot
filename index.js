@@ -337,6 +337,17 @@ async function getCurrentLowest(sourceType, recordId, excludeOfferRecordId = nul
 
   if (!Number.isFinite(maxPrice)) return null;
 
+  if (normalizeSourceType(sourceType) === 'member_wtb') {
+    const offerMargin = parseNumeric(record.get('Offer Margin')) ?? 10;
+    const maxSellerOffer = Math.max(0, maxPrice - offerMargin);
+
+    return {
+      normalized: maxSellerOffer,
+      raw: maxSellerOffer,
+      vatType: 'Margin'
+    };
+  }
+
   return { normalized: maxPrice, raw: maxPrice, vatType: 'Margin' };
 }
 
@@ -1463,16 +1474,23 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
         
         if (orderId) {
-          const config = getSourceConfig(sourceType);
           const lowestAfterSave = await getCurrentLowest(sourceType, orderId);
         
           if (lowestAfterSave && Number.isFinite(lowestAfterSave.raw)) {
             const updateFields = {};
         
-            // Alleen Member WTB heeft een editable Lowest Offer veld.
-            // UOL Current Lowest Offer is computed, dus NIET schrijven.
-            if (sourceType === "member_wtb" && config.lowestOfferField) {
-              updateFields[config.lowestOfferField] = lowestAfterSave.raw;
+            if (sourceType === "member_wtb") {
+              updateFields["Current Lowest Offer"] = lowestAfterSave.raw;
+              updateFields["Current Lowest Normalized"] = lowestAfterSave.normalized;
+              updateFields["Current Lowest Seller Offer"] = [savedOffer.id];
+        
+              updateFields["New Offer Available"] = true;
+              updateFields["Offer Sent?"] = false;
+        
+              updateFields["Lowest Offer"] = lowestAfterSave.raw;
+              updateFields["Lowest Offer Normalized"] = lowestAfterSave.normalized;
+              updateFields["Lowest Offer VAT Type"] = lowestAfterSave.vatType;
+              updateFields["Lowest Offer Seller ID"] = [sellerRecordId];
             }
         
             if (Object.keys(updateFields).length) {
