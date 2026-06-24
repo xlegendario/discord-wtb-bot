@@ -741,7 +741,7 @@ app.post('/seller-offer/place-from-portal', async (req, res) => {
       });
     }
     
-    if (cleanSourceType === 'member_wtb' && ['Allocated', 'Fulfilled', 'Cancelled'].includes(fulfillmentStatus)) {
+    if (cleanSourceType === 'member_wtb' && ['Confirmed', 'Allocated', 'Fulfilled', 'Cancelled'].includes(fulfillmentStatus)) {
       return res.status(409).json({
         error: 'This WTB is no longer open for offers.'
       });
@@ -965,6 +965,7 @@ app.post('/member-wtb/deal-channel', async (req, res) => {
     });
 
     await base(memberWtbsTableName).update(memberWtbRecordId, {
+      'Fulfillment Status': 'Confirmed',
       'WTB Channel ID': result.channelId
     });
 
@@ -1461,6 +1462,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
         if (sourceType === 'member_wtb') {
           if (!sourceRecord) {
             await interaction.editReply({ content: '❌ Member WTB not found.' }).catch(() => null);
+            return;
+          }
+        
+          const memberWtbFulfillmentStatus = String(sourceRecord.get('Fulfillment Status') || '').trim();
+        
+          if (['Confirmed', 'Allocated', 'Fulfilled', 'Cancelled'].includes(memberWtbFulfillmentStatus)) {
+            await interaction.editReply({
+              content: '❌ This WTB is no longer open for offers.'
+            }).catch(() => null);
             return;
           }
         
