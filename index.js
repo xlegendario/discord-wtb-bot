@@ -964,12 +964,11 @@ app.post('/member-wtb/deal-channel', async (req, res) => {
       imageUrl
     });
 
-    await base(memberWtbsTableName).update(memberWtbRecordId, {
-      'Fulfillment Status': 'Confirmed',
-      'WTB Channel ID': result.channelId
-    });
-
     await disableSellerOfferMessages(memberWtbRecordId, 'member_wtb');
+
+    await base(memberWtbsTableName).update(memberWtbRecordId, {
+      'Fulfillment Status': 'Confirmed'
+    });
 
     return res.json({
       ok: true,
