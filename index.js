@@ -1549,7 +1549,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
 
         // OPTIONAL: store/refresh Discord ID on the Seller record (editable field!)
-        const SELLER_DISCORD_ID_FIELD = 'Discord User ID';
+        const SELLER_DISCORD_ID_FIELD = 'Discord ID';
 
         const existing = sellers[0]?.get?.(SELLER_DISCORD_ID_FIELD) || null;
         if (!existing) {
@@ -1573,8 +1573,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
         
         let savedOffer;
 
-        if (existingOffer) {
-          savedOffer = await base(sellerOffersTableName).update(existingOffer.id, fields);
+        const freshExistingOffer = orderId
+          ? await findExistingSellerOffer(sourceType, orderId, sellerRecordId)
+          : null;
+        
+        if (freshExistingOffer) {
+          savedOffer = await base(sellerOffersTableName).update(freshExistingOffer.id, fields);
         } else {
           savedOffer = await base(sellerOffersTableName).create(fields);
         }
