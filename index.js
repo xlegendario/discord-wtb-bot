@@ -803,6 +803,45 @@ app.post('/seller-offer/place-from-portal', async (req, res) => {
     } else {
       savedOffer = await base(sellerOffersTableName).create(fields);
     }
+
+    if (cleanSourceType === "member_wtb") {
+      const lowestAfterSave = await getCurrentLowest(cleanSourceType, orderRecordId);
+    
+      if (lowestAfterSave && Number.isFinite(lowestAfterSave.raw)) {
+        await getSourceTable(cleanSourceType).update(orderRecordId, {
+          "Current Lowest Offer": lowestAfterSave.raw,
+          "Current Lowest Normalized": lowestAfterSave.normalized,
+          "Current Lowest Seller Offer": [savedOffer.id],
+    
+          "New Offer Available": false,
+          "Offer Sent?": true,
+    
+          "Lowest Offer": lowestAfterSave.raw,
+          "Lowest Offer Normalized": lowestAfterSave.normalized,
+          "Lowest Offer VAT Type": lowestAfterSave.vatType,
+          "Lowest Offer Seller ID": [sellerRecord.id]
+        });
+    
+        if (
+          !isMemberWtbAutoAccept(orderRecord) &&
+          KC_PORTAL_BASE_URL &&
+          KC_PORTAL_SECRET
+        ) {
+          await fetch(`${KC_PORTAL_BASE_URL}/api/member-wtb/send-current-offer-to-buyer`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "x-kc-secret": KC_PORTAL_SECRET
+            },
+            body: JSON.stringify({
+              member_wtb_record_id: orderRecordId
+            })
+          }).catch((err) => {
+            console.error("Failed to send current offer to buyer:", err);
+          });
+        }
+      }
+    }
     
     return res.json({
       ok: true,
@@ -810,7 +849,8 @@ app.post('/seller-offer/place-from-portal', async (req, res) => {
       offerRecordId: savedOffer.id,
       offerAmount: offerPrice,
       vatType: normalizedVatType,
-      normalizedOffer
+      normalizedOffer,
+      sourceType: cleanSourceType
     });
   } catch (err) {
     console.error('Portal offer submit failed:', err);
