@@ -759,7 +759,15 @@ app.post('/seller-offer/place-from-portal', async (req, res) => {
     const lowest = await getCurrentLowest(cleanSourceType, orderRecordId, existingOffer?.id || null);
 
     if (lowest) {
-      const maxAllowedGross = lowest.normalized - MIN_UNDERCUT_STEP;
+      const isFirstMemberWtbOffer =
+        cleanSourceType === "member_wtb" &&
+        !existingOffer &&
+        parseNumeric(orderRecord.get("Current Lowest Offer")) === null &&
+        parseNumeric(orderRecord.get("Lowest Offer")) === null;
+    
+      const maxAllowedGross = isFirstMemberWtbOffer
+        ? lowest.normalized
+        : lowest.normalized - MIN_UNDERCUT_STEP;
 
       if (normalizedOffer > maxAllowedGross + 1e-9) {
         let maxForSeller = maxAllowedGross;
