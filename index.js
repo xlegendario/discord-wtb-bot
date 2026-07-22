@@ -1140,7 +1140,15 @@ async function createMemberWtbDealChannel({
 
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
-      .setCustomId(`process_member_wtb:${memberWtbRecord.id}:${sellerOfferRecordId}`)
+      // FIXED — this button previously only carried the two record
+      // IDs, so the "Process Deal" step had no way to know a
+      // negotiated counter price/VAT type were ever involved — it
+      // would silently fall back to re-reading the Seller Offer
+      // record's own (original, non-countered) price. Now carries the
+      // exact price/VAT type actually shown in this channel, so the
+      // processing step can use them instead of recomputing from
+      // scratch.
+      .setCustomId(`process_member_wtb:${memberWtbRecord.id}:${sellerOfferRecordId}:${offerPrice}:${vatType || ''}`)
       .setLabel('Process Deal')
       .setStyle(ButtonStyle.Primary)
   );
@@ -1168,7 +1176,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
       await interaction.deferUpdate().catch(() => null);
     
       try {
-        const [, memberWtbRecordId, sellerOfferRecordId] = interaction.customId.split(':');
+        // FIXED — parse the optional override price/VAT type now
+        // carried in the customId (see createMemberWtbDealChannel),
+        // and forward them so process-seller-offer uses the actually
+        // negotiated amount instead of re-reading the Seller Offer
+        // record's original price.
+        const [, memberWtbRecordId, sellerOfferRecordId, overridePriceRaw, overrideVatType] =
+          interaction.customId.split(':');
+
+        const overridePrice = overridePriceRaw !== undefined && overridePriceRaw !== ''
+          ? Number(overridePriceRaw)
+          : null;
     
         if (!KC_PORTAL_BASE_URL || !KC_PORTAL_SECRET) {
           throw new Error('KC_PORTAL_BASE_URL or KC_PORTAL_SECRET is missing');
@@ -1184,7 +1202,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
             member_wtb_record_id: memberWtbRecordId,
             seller_offer_record_id: sellerOfferRecordId,
             discord_channel_id: interaction.channelId,
-            discord_message_id: interaction.message.id
+            discord_message_id: interaction.message.id,
+            override_purchase_price: Number.isFinite(overridePrice) && overridePrice > 0 ? overridePrice : undefined,
+            override_vat_type: overrideVatType || undefined
           })
         });
     
