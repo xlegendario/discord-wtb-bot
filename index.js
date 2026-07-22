@@ -992,8 +992,24 @@ app.post('/member-wtb/deal-channel', async (req, res) => {
       return res.status(400).json({ error: 'Seller missing Discord User ID' });
     }
 
-    const offerPrice = Number(sellerOfferRecord.get('Seller Offer') || 0);
-    const vatType = sellerOfferRecord.get('Offer VAT Type') || '';
+    // NEW — additive only: optional override for the price/VAT type
+    // used to create the deal. Needed for the counter-offer flow, where
+    // the agreed price is the negotiated counter amount, not whatever
+    // is currently stored on the Seller Offer record — and that record
+    // can be linked to more than one Member WTB (see
+    // SELLER_OFFERS_FIELD_LINKED_MEMBER_WTBS above), so overwriting its
+    // own price field to reflect one specific negotiation isn't safe.
+    // Falls back to the exact existing behavior (reading from the
+    // Seller Offer record) when not provided, so every existing caller
+    // is unaffected.
+    const overridePrice = req.body?.override_price != null ? Number(req.body.override_price) : null;
+    const overrideVatType = req.body?.override_vat_type ? String(req.body.override_vat_type).trim() : null;
+
+    const offerPrice = Number.isFinite(overridePrice) && overridePrice > 0
+      ? overridePrice
+      : Number(sellerOfferRecord.get('Seller Offer') || 0);
+
+    const vatType = overrideVatType || sellerOfferRecord.get('Offer VAT Type') || '';
 
     const picture = memberWtbRecord.get('Picture');
     const imageUrl =
