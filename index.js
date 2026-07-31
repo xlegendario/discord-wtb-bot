@@ -756,7 +756,21 @@ app.post('/seller-offer/place-from-portal', async (req, res) => {
     }
 
     const existingOffer = await findExistingSellerOffer(cleanSourceType, orderRecord.id, sellerRecord.id);
-    const lowest = await getCurrentLowest(cleanSourceType, orderRecordId, existingOffer?.id || null);
+
+    // FIXED — this always excluded the found "existing offer" from the
+    // undercut comparison, which is correct for a genuine edit (you
+    // shouldn't have to beat your own current live offer) but wrong
+    // here: findExistingSellerOffer has no status filter, so it also
+    // matches a withdrawn/denied record — excluding IT from the
+    // comparison meant a fresh re-offer at the exact same, already-
+    // denied price went through with no validation at all. Only
+    // exclude when the found record is a genuinely active offer, not
+    // one that was withdrawn or denied.
+    const existingOfferIsWithdrawnOrDenied =
+      !!existingOffer?.get('Withdrawn?') || !!existingOffer?.get('Denied?');
+    const excludeOfferRecordId = existingOfferIsWithdrawnOrDenied ? null : (existingOffer?.id || null);
+
+    const lowest = await getCurrentLowest(cleanSourceType, orderRecordId, excludeOfferRecordId);
 
     if (lowest) {
       const isFirstMemberWtbOffer =
