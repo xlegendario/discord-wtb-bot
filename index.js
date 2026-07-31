@@ -793,7 +793,17 @@ app.post('/seller-offer/place-from-portal', async (req, res) => {
       'Offer Cost (Normalized)': normalizedOffer,
       'Offer Date': new Date().toISOString(),
       'Seller ID': [sellerRecord.id],
-      [config.linkedOfferField]: [orderRecord.id]
+      [config.linkedOfferField]: [orderRecord.id],
+      // NEW — additive only: findExistingSellerOffer above can match a
+      // previously-withdrawn record (soft-deleted via the Portal's
+      // Delete button) and UPDATE it here rather than creating a new
+      // one — without this, "Withdrawn?" would stay true forever,
+      // leaving a fresh, validated, genuinely active offer invisible
+      // in the Portal even though it correctly went through. Also
+      // clears "Denied?", since a fresh submission is no longer the
+      // thing that was denied.
+      'Withdrawn?': false,
+      'Denied?': false
     };
 
     let savedOffer;
