@@ -1538,9 +1538,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
     
         const sellerDigits = interaction.fields.getTextInputValue('seller_id').trim();
+        // FIXED — this never encoded sourceType/orderId, so the retry
+        // button's later re-opened modal always fell back to
+        // sourceType="order" (hardcoded default in the modal-submit
+        // handler) — meaning a Member WTB retry got silently treated
+        // as a Store Order: wrong table lookup, no confirmation DM,
+        // and the offer never linked to the actual Member WTB (so it
+        // never showed up in Buying either). Now carries both through.
         const retryCustomId =
           interaction.guildId && interaction.channelId
-            ? `retry_offer:${interaction.guildId}:${interaction.channelId}:${messageId}`
+            ? `retry_offer:${sourceType}:${orderId || ''}:${interaction.guildId}:${interaction.channelId}:${messageId}`
             : null;
     
         if (!/^\d+$/.test(sellerDigits)) {
@@ -1805,28 +1812,55 @@ client.on(Events.InteractionCreate, async (interaction) => {
     /* ---- RETRY OFFER BUTTON (DM) ---- */
     if (interaction.isButton() && interaction.customId.startsWith('retry_offer:')) {
       const parts = interaction.customId.split(':');
-      const messageId = parts[3];
 
-      // Re-open the offer modal with the same placeholder logic
-      let orderRecord = null;
+      // FIXED — old customId was retry_offer:guildId:channelId:messageId
+      // (4 parts) with no sourceType/orderId at all, so the reopened
+      // modal always fell back to sourceType="order" downstream —
+      // meaning a Member WTB retry got silently treated as a Store
+      // Order: wrong table lookup, no confirmation DM, offer never
+      // linked to the actual Member WTB (so never showed up in
+      // Buying either). Now retry_offer:sourceType:orderId:guildId:
+      // channelId:messageId (6 parts) carries both through; the else
+      // branch keeps the old 4-part shape working for any already-
+      // sent DM whose retry button predates this fix.
+      let sourceType = 'order';
+      let orderId = null;
+      let messageId;
+
+      if (parts.length >= 6) {
+        sourceType = normalizeSourceType(parts[1]);
+        orderId = parts[2] || null;
+        messageId = parts[5];
+      } else {
+        messageId = parts[3];
+      }
+
+      // Re-open the offer modal with the same placeholder logic — now
+      // correctly looks up the right table (Member WTBs vs Orders)
+      // instead of always assuming Orders.
+      let sourceRecord = null;
       try {
-        const recs = await base(ordersTableName)
-          .select({
-            filterByFormula: `SEARCH("${messageId}", {${ORDER_FIELD_SELLER_MSG_IDS}})`,
-            maxRecords: 1
-          })
-          .firstPage();
-        orderRecord = recs[0] || null;
+        if (orderId) {
+          sourceRecord = await base(getSourceConfig(sourceType).tableName).find(orderId);
+        } else {
+          const recs = await base(getSourceConfig(sourceType).tableName)
+            .select({
+              filterByFormula: `SEARCH("${messageId}", {${ORDER_FIELD_SELLER_MSG_IDS}})`,
+              maxRecords: 1
+            })
+            .firstPage();
+          sourceRecord = recs[0] || null;
+        }
       } catch (_) {}
 
       let offerPlaceholder = 'Enter your offer (e.g. 140)';
-      if (orderRecord) {
-        const currentLowestRaw = orderRecord.get(ORDER_FIELD_CURRENT_LOWEST_OFFER);
+      if (sourceRecord) {
+        const currentLowestRaw = sourceRecord.get(ORDER_FIELD_CURRENT_LOWEST_OFFER);
         if (currentLowestRaw) offerPlaceholder = `Current Lowest Offer: ${currentLowestRaw}`;
       }
 
       const modal = new ModalBuilder()
-        .setCustomId(`seller_offer_modal:${messageId}`)
+        .setCustomId(`seller_offer_modal:${sourceType}:${orderId || ''}:${messageId}`)
         .setTitle('Enter Seller ID, VAT & Offer');
 
       modal.addComponents(
