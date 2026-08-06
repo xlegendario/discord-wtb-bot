@@ -111,6 +111,7 @@ const INVITE_URL = 'https://discord.gg/GZY9NBpYUS';
 const base = new Airtable({ apiKey: AIRTABLE_API_KEY }).base(AIRTABLE_BASE_ID);
 
 const sellerOffersTableName = AIRTABLE_SELLER_OFFERS_TABLE || 'Seller Offers';
+const counterOffersTableName = 'Counter Offers';
 const sellersTableName = AIRTABLE_SELLERS_TABLE || 'Sellers Database';
 const ordersTableName = AIRTABLE_ORDERS_TABLE || 'Unfulfilled Orders Log';
 const memberWtbsTableName = AIRTABLE_MEMBER_WTBS_TABLE || 'Member WTBs';
@@ -296,7 +297,58 @@ async function getCurrentLowest(sourceType, recordId, excludeOfferRecordId = nul
   const config = getSourceConfig(sourceType);
   const offers = await base(sellerOffersTableName).select().all();
 
+  // NEW — additive only: his explicit request — a fresh offer must
+  // also beat any OTHER seller's live counter position, not just their
+  // raw, possibly-stale Seller Offer (their raw offer never changes
+  // once they start negotiating — the Counter Offers table is where
+  // their actual current position lives). Sellers who currently have
+  // an open counter round get excluded from the raw-offer pass below
+  // and use their live counter price here instead.
+  const isMemberWtb = normalizeSourceType(sourceType) === 'member_wtb';
+  const counterSourceType = isMemberWtb ? 'Member WTB' : 'Seller Offer';
+  const counterLinkField = isMemberWtb ? 'Member WTB' : 'Order';
+
+  let activeCounters = [];
+  try {
+    activeCounters = await base(counterOffersTableName)
+      .select({
+        filterByFormula: `AND({Status} = 'Open', {Source Type} = '${counterSourceType}')`
+      })
+      .all();
+  } catch (err) {
+    console.error('Failed to fetch active counters for cross-seller lowest check (non-blocking):', err);
+  }
+
+  const sellerIdsWithActiveCounter = new Set();
   let best = null;
+
+  for (const cr of activeCounters) {
+    const links = cr.get(counterLinkField);
+    const linkedId = Array.isArray(links) ? links[0] : links;
+    const matchId = typeof linkedId === 'string' ? linkedId : linkedId?.id;
+    if (matchId !== recordId) continue;
+
+    const sellerLinks = cr.get('Seller ID');
+    const sellerLinkId = Array.isArray(sellerLinks) ? sellerLinks[0] : sellerLinks;
+    const sellerId = typeof sellerLinkId === 'string' ? sellerLinkId : sellerLinkId?.id;
+    if (sellerId) sellerIdsWithActiveCounter.add(sellerId);
+
+    const sellerCounterPrice = parseNumeric(cr.get('Seller Counter Price'));
+    const sellerOriginalPrice = parseNumeric(cr.get('Seller Original Price'));
+    const effectivePrice = sellerCounterPrice || sellerOriginalPrice;
+    const vatRaw = cr.get('Seller Original VAT Type');
+    const vat = typeof vatRaw === 'string' ? vatRaw : vatRaw?.name;
+    const vatNorm = normalizeVatType(vat);
+
+    if (!effectivePrice) continue;
+
+    const normalized = getNormalized(effectivePrice, vatNorm);
+    if (!Number.isFinite(normalized)) continue;
+
+    if (!best || normalized < best.normalized) {
+      best = { normalized, raw: effectivePrice, vatType: vatNorm };
+    }
+  }
 
   for (const rec of offers) {
     if (excludeOfferRecordId && rec.id === excludeOfferRecordId) continue;
@@ -309,6 +361,13 @@ async function getCurrentLowest(sourceType, recordId, excludeOfferRecordId = nul
     );
 
     if (!matches) continue;
+
+    // Skip — this seller has an active counter round, already
+    // accounted for above using their live position instead.
+    const sellerLinks = rec.get('Seller ID');
+    const sellerLinkId = Array.isArray(sellerLinks) ? sellerLinks[0] : sellerLinks;
+    const sellerId = typeof sellerLinkId === 'string' ? sellerLinkId : sellerLinkId?.id;
+    if (sellerId && sellerIdsWithActiveCounter.has(sellerId)) continue;
 
     const price = parseNumeric(rec.get('Seller Offer'));
     const vatRaw = rec.get('Offer VAT Type');
