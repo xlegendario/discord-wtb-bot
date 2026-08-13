@@ -1334,6 +1334,22 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return interaction.reply({ content: '❌ Missing deal details on this message.', flags: MessageFlags.Ephemeral })
       }
 
+      // Double-click guard: disable the buttons IMMEDIATELY, before the
+      // slow webhook fetch below, so a second click during the round-trip
+      // can't process the deal twice. This edit also serves as the 3s ack.
+      const guardDisabledComponents = interaction.message.components.map((row) =>
+        new ActionRowBuilder().addComponents(
+          ...row.components.map((comp) => ButtonBuilder.from(comp).setDisabled(true))
+        )
+      );
+      try {
+        await interaction.update({ components: guardDisabledComponents });
+      } catch (guardErr) {
+        // If the update fails, the message was likely already acted on
+        // (another click won the race) — stop here rather than double-fire.
+        return;
+      }
+
       const lines = embed.description.split('\n');
       const get = (label) => {
         const line = lines.find((l) => l.startsWith(label));
@@ -1361,14 +1377,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       }).catch(() => null);
-
-      const disabledComponents = interaction.message.components.map((row) =>
-        new ActionRowBuilder().addComponents(
-          ...row.components.map((comp) => ButtonBuilder.from(comp).setDisabled(true))
-        )
-      );
-
-      await interaction.message.edit({ components: disabledComponents }).catch(() => null);
 
       const finalPayout = Number.isFinite(payload.payout) ? payload.payout : null;
       const payoutLine = finalPayout !== null ? `Final payout: €${finalPayout.toFixed(2)}` : 'Final payout: see deal details above';
@@ -1409,7 +1417,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         components: [requestLabelRow]
       });
 
-      return interaction.reply({ content: '✅ Deal processed and instructions sent in this channel.', flags: MessageFlags.Ephemeral })
+      return interaction.followUp({ content: '✅ Deal processed and instructions sent in this channel.', flags: MessageFlags.Ephemeral })
     }
 
     if (interaction.isButton() && interaction.customId.startsWith('request_label_wtb:')) {
