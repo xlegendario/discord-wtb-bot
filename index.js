@@ -200,6 +200,32 @@ function getAllowedVatTypesText(filter) {
   return 'Margin, VAT0 or VAT21';
 }
 
+// Validates a seller's chosen VAT type against their Sellers Database
+// profile (VAT ID + Country). Returns null when allowed, or the exact
+// block message when not. Rules: no VAT ID → Margin only; VAT ID + NL →
+// no VAT0; VAT ID + non-NL → no VAT21. Margin always allowed. Mirrors
+// validateSellerVatEligibility in the kickz-caviar portal so both the
+// Discord and Portal offer-placement paths enforce identical rules.
+function validateSellerVatEligibility(sellerVatId, sellerCountry, chosenVatType) {
+  const vat = String(chosenVatType || '').trim();
+  if (vat === 'Margin') return null;
+
+  const hasVatId = !!String(sellerVatId || '').trim();
+  const country = String(sellerCountry || '').trim().toLowerCase();
+  const isNl = country === 'netherlands' || country === 'nederland' || country === 'nl';
+
+  if (!hasVatId) {
+    return "You're not a registered company according to your profile. Please select Margin VAT Type or contact support.";
+  }
+  if (isNl && vat === 'VAT0') {
+    return "As a Dutch company, you can't sell VAT0 to Kickz Caviar B.V.. Please select VAT21 or Margin VAT Type or contact support.";
+  }
+  if (!isNl && vat === 'VAT21') {
+    return "As a Non-Dutch company, you can't sell VAT21 to Kickz Caviar B.V.. Please select VAT0 or Margin VAT Type or contact support.";
+  }
+  return null;
+}
+
 function isMemberWtbAutoAccept(record) {
   return record?.get?.('Auto Accept Seller Offers?') === true;
 }
@@ -790,6 +816,19 @@ app.post('/seller-offer/place-from-portal', async (req, res) => {
       return res.status(404).json({
         error: 'Seller not found.'
       });
+    }
+
+    // Block based on the seller's own registration profile (VAT ID +
+    // Country), independent of the WTB's buyer filter above: a private
+    // seller (no VAT ID) can only sell Margin; a Dutch company can't
+    // sell VAT0; a non-Dutch company can't sell VAT21.
+    const sellerVatEligibilityError = validateSellerVatEligibility(
+      sellerRecord.get('VAT ID'),
+      sellerRecord.get('Country'),
+      normalizedVatType
+    );
+    if (sellerVatEligibilityError) {
+      return res.status(400).json({ error: sellerVatEligibilityError });
     }
 
     const fulfillmentStatus = String(orderRecord.get('Fulfillment Status') || '').trim();
@@ -1689,6 +1728,20 @@ client.on(Events.InteractionCreate, async (interaction) => {
           const msg = `❌ Seller ${sellerCode} not found.`;
           await interaction.editReply({ content: msg }).catch(() => null);
           await safeDMWithRetry(interaction.user, `${msg}\n\nPlease check your Seller ID and try again by clicking the button below.`, retryCustomId);
+          return;
+        }
+
+        // Block based on the seller's own registration profile (VAT ID +
+        // Country): private seller (no VAT ID) → Margin only; Dutch
+        // company → no VAT0; non-Dutch company → no VAT21.
+        const sellerVatEligibilityError = validateSellerVatEligibility(
+          sellers[0]?.get('VAT ID'),
+          sellers[0]?.get('Country'),
+          vatInput
+        );
+        if (sellerVatEligibilityError) {
+          await interaction.editReply({ content: `❌ ${sellerVatEligibilityError}` }).catch(() => null);
+          await safeDMWithRetry(interaction.user, `❌ ${sellerVatEligibilityError}\n\nYour offer was **not** saved. You can try again by clicking the button below.`, retryCustomId);
           return;
         }
         
