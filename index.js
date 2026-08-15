@@ -259,6 +259,43 @@ function getNormalized(price, vatType) {
   return price;
 }
 
+// NEW — additive only: Airtable lookup fields arrive as arrays
+// (["0.22"]), and parseNumeric only understands numbers and strings, so
+// it returns null for them. Needed to read "Client VAT Rate" off an
+// Unfulfilled Orders Log record.
+function lookupNumber(value) {
+  return parseNumeric(Array.isArray(value) ? value[0] : value);
+}
+
+// NEW — additive only: which divisor converts a "max allowed offer"
+// down to the VAT0 scale a seller types in.
+//
+// getCurrentLowest can return a figure from two completely different
+// scales, and they need different divisors:
+//
+//   basis 'offers'            — another seller's live position. That is
+//                               already a SELLER-side number on the
+//                               Dutch all-in scale, so 1.21. Unchanged.
+//   basis 'member_wtb_max'    — a Member WTB's Max Price. Buyer side,
+//                               Dutch VAT, so 1.21. Unchanged.
+//   basis 'max_buying_price'  — the STORE's "Maximum Buying Price",
+//                               which is all-in in the CLIENT's own VAT
+//                               scale (Italy 22%, Denmark 25%). Using
+//                               1.21 here mixed the Dutch rate into a
+//                               foreign store's number and handed the
+//                               first seller on an untouched order a
+//                               ceiling that was several euro too high.
+//
+// Falls back to 1.21 whenever the rate is missing, so behaviour is
+// unchanged for anything that does not carry one.
+function vat0CeilingDivisor(lowest) {
+  const rate = lowest?.clientVatRate;
+  if (lowest?.basis === 'max_buying_price' && Number.isFinite(rate) && rate > 0) {
+    return 1 + rate;
+  }
+  return 1.21;
+}
+
 /**
  * Format lowest offer incl. VAT conversions
  * (used in the undercut error messaging).
@@ -410,7 +447,10 @@ async function getCurrentLowest(sourceType, recordId, excludeOfferRecordId = nul
     }
   }
 
-  if (best) return best;
+  // NEW — additive only: tag which scale this figure is in, so callers
+  // can pick the right VAT0 divisor (see vat0CeilingDivisor). This path
+  // is a real seller position, i.e. already seller-side.
+  if (best) return { ...best, basis: 'offers' };
 
   const record = await getSourceTable(sourceType).find(recordId).catch(() => null);
   if (!record) return null;
@@ -423,17 +463,38 @@ async function getCurrentLowest(sourceType, recordId, excludeOfferRecordId = nul
   if (!Number.isFinite(maxPrice)) return null;
 
   if (normalizeSourceType(sourceType) === 'member_wtb') {
-    const offerMargin = parseNumeric(record.get('Offer Margin')) ?? 10;
+    // FIXED — `?? 10` only catches null/undefined, so a configured
+    // "Offer Margin" of 0 was taken literally here while Airtable's
+    // IF({Offer Margin}, {Offer Margin}, 10) falls back to 10 — the two
+    // then disagreed about the max allowed seller offer. Mirrors
+    // getMemberWtbMargin() in kickz-caviar-portal-main exactly: the
+    // field wins unless it is blank, non-numeric, or 0.
+    const configuredMargin = parseNumeric(record.get('Offer Margin'));
+    const offerMargin = Number.isFinite(configuredMargin) && configuredMargin !== 0
+      ? configuredMargin
+      : 10;
     const maxSellerOffer = Math.max(0, maxPrice - offerMargin);
 
     return {
       normalized: maxSellerOffer,
       raw: maxSellerOffer,
-      vatType: 'Margin'
+      vatType: 'Margin',
+      // Member WTBs have no client — the buyer side is Dutch VAT, so the
+      // VAT0 divisor stays 1.21.
+      basis: 'member_wtb_max'
     };
   }
 
-  return { normalized: maxPrice, raw: maxPrice, vatType: 'Margin' };
+  // Store order, no offers yet: this figure is "Maximum Buying Price",
+  // which is all-in in the CLIENT's own VAT scale — not the Dutch one.
+  // Carry the client rate so the ceiling can be converted correctly.
+  return {
+    normalized: maxPrice,
+    raw: maxPrice,
+    vatType: 'Margin',
+    basis: 'max_buying_price',
+    clientVatRate: lookupNumber(record.get('Client VAT Rate'))
+  };
 }
 
 async function findExistingSellerOffer(sourceType, recordId, sellerRecordId) {
@@ -885,7 +946,11 @@ app.post('/seller-offer/place-from-portal', async (req, res) => {
         let maxForSeller = maxAllowedGross;
 
         if (normalizedVatType === 'VAT0') {
-          maxForSeller = maxAllowedGross / 1.21;
+          // FIXED — was a hardcoded 1.21. When there are no offers yet,
+          // maxAllowedGross comes from the store's "Maximum Buying
+          // Price", which is all-in in the CLIENT's VAT scale. See
+          // vat0CeilingDivisor. An offer-derived ceiling still uses 1.21.
+          maxForSeller = maxAllowedGross / vat0CeilingDivisor(lowest);
         }
 
         const maxForSellerRounded = Math.floor(maxForSeller);
@@ -1767,7 +1832,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
               const lowestStr = formatLowestForDisplay(lowest);
     
               let maxForSeller = maxAllowedGross;
-              if (vatInput === 'VAT0') maxForSeller = maxAllowedGross / 1.21;
+              // FIXED — same hardcoded 1.21 as the HTTP path above; see
+              // vat0CeilingDivisor for why the basis decides the divisor.
+              if (vatInput === 'VAT0') maxForSeller = maxAllowedGross / vat0CeilingDivisor(lowest);
     
               const maxForSellerRounded = Math.floor(maxForSeller);
 
