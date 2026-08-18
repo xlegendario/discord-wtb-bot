@@ -1196,7 +1196,21 @@ app.post('/member-wtb/deal-channel', async (req, res) => {
       ? overridePrice
       : Number(sellerOfferRecord.get('Seller Offer') || 0);
 
-    const vatType = overrideVatType || sellerOfferRecord.get('Offer VAT Type') || '';
+    // FIXED — precedence was reversed against the portal, which resolves
+    // the same thing as `record || override` in process-seller-offer. The
+    // PRICE override exists because one Seller Offer can be linked to
+    // several Member WTBs, so its stored price need not reflect this
+    // negotiation. A VAT type is not like that: it is a property of the
+    // offer itself, one value per record, identical for every WTB it
+    // touches. An override can therefore only ever equal it or be wrong.
+    //
+    // Inert today — all 18 writers of "Counter Payout VAT Type" store the
+    // seller's own type — but this value is shown to the SELLER as
+    // "VAT Type:" in his deal channel and baked into the Process Deal
+    // customId below, so a caller passing a buyer-facing label would show
+    // him VAT0 while he sells VAT21. The record still falls back to the
+    // override when it cannot be read, so no caller loses behaviour.
+    const vatType = sellerOfferRecord.get('Offer VAT Type') || overrideVatType || '';
 
     const picture = memberWtbRecord.get('Picture');
     const imageUrl =
