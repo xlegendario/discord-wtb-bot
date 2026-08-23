@@ -190,6 +190,20 @@ function normalizeVatType(raw) {
 // De portal weet wie bij welk Discord ID hoort en verstuurt de mail voor het
 // claimen van een profiel. Deze bot vraagt het daar op in plaats van bij elke
 // offer een Seller ID uit te vragen.
+
+// Zonder deze twee valt de seller-lookup stil terug op de oude route: de
+// gebruiker krijgt dan alsnog het offerformulier en pas bij het versturen te
+// horen dat er iets mis is. Die terugval is met opzet (een platte portal mag
+// niet alles blokkeren), maar een ontbrekende env-var hoort zichtbaar te zijn.
+if (!KC_PORTAL_SECRET) {
+  console.error(
+    '❌ KC_PORTAL_SECRET ontbreekt — seller-lookup en profiel claimen werken niet. ' +
+      'Zet KC_PORTAL_SECRET en KC_PORTAL_BASE_URL op deze service.'
+  );
+} else {
+  console.log(`✅ Portal-koppeling actief: ${KC_PORTAL_BASE_URL}`);
+}
+
 async function portalPost(path, body) {
   if (!KC_PORTAL_BASE_URL || !KC_PORTAL_SECRET) {
     throw new Error('KC_PORTAL_BASE_URL or KC_PORTAL_SECRET is missing');
@@ -257,9 +271,9 @@ const NOT_LINKED_EMBED = {
   description: [
     "This Discord account isn't connected to a seller profile, so we don't know who's making this offer.",
     '',
-    "**Sold with us before?** Use *Link my Seller ID* — you'll need your Seller ID and the email on your profile. One time only.",
+    "**Sold with us before?** Use *Link my Seller ID* — you'll need your Seller ID and the email on your profile.",
     '',
-    "**New here?** Use *Create a profile*. It's one form and then you can offer straight away."
+    '**New here?** Use *Create a profile* to sign up.'
   ].join('\n'),
   color: 0xf1c40f
 };
