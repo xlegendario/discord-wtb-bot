@@ -219,6 +219,64 @@ const PORTAL_SIGNUP_URL = `${String(KC_PORTAL_BASE_URL || 'https://kickzcaviar.c
 // herstart niet te overleven, dan klikt hij gewoon nog een keer.
 const pendingOffers = new Map();
 
+// Discord geeft drie seconden om op een knopklik te antwoorden, en showModal
+// kan niet uitgesteld worden. Een korte cache houdt de veelvoorkomende klik
+// (bekende seller) op nul netwerkverkeer.
+const sellerLookupCache = new Map();
+const SELLER_LOOKUP_TTL_MS = 5 * 60 * 1000;
+
+function forgetSellerLookup(discordId) {
+  sellerLookupCache.delete(discordId);
+}
+
+// Geeft het lookup-resultaat terug, of null als het niet op tijd lukte. Bij
+// null gaat de aanroeper gewoon door met de offer-modal: de submit-handler
+// vangt het dan alsnog af, zoals voorheen.
+async function lookupSellerCached(discordId) {
+  const cached = sellerLookupCache.get(discordId);
+
+  if (cached && Date.now() - cached.at < SELLER_LOOKUP_TTL_MS) return cached.value;
+
+  try {
+    const value = await Promise.race([
+      portalPost('/api/internal/seller-by-discord', { discord_id: discordId }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2000))
+    ]);
+
+    sellerLookupCache.set(discordId, { value, at: Date.now() });
+    return value;
+  } catch (err) {
+    console.error('seller-by-discord lookup failed:', err.message);
+    return null;
+  }
+}
+
+function buildClaimProfileModal() {
+  const modal = new ModalBuilder()
+    .setCustomId('claim_profile_modal')
+    .setTitle('Link your Seller ID');
+
+  modal.addComponents(
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId('claim_seller_id')
+        .setLabel('Your Seller ID (numbers only)')
+        .setPlaceholder('00001')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+    ),
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId('claim_email')
+        .setLabel('The email on your seller profile')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+    )
+  );
+
+  return modal;
+}
+
 function isVatTypeAllowedForMemberWtbFilter(filter, vatType) {
   const cleanFilter = String(filter || '').trim();
 
@@ -1688,6 +1746,23 @@ client.on(Events.InteractionCreate, async (interaction) => {
         orderRecord = recs[0] || null;
       } catch (_) {}
 
+      // Nog geen gekoppeld profiel? Dan meteen de claim-modal openen in
+      // plaats van de offer-modal. Dit moet hier gebeuren en niet bij het
+      // versturen: Discord staat geen modal toe als antwoord op een modal, dus
+      // daar rest alleen een ephemeral bericht — en dat verschijnt onderaan het
+      // kanaal, waar het over het hoofd gezien wordt.
+      const sellerCheck = await lookupSellerCached(interaction.user.id);
+
+      if (sellerCheck && !sellerCheck.found) {
+        pendingOffers.set(interaction.user.id, {
+          retryCustomId: interaction.customId,
+          at: Date.now()
+        });
+
+        await interaction.showModal(buildClaimProfileModal());
+        return;
+      }
+
       let offerPlaceholder = 'Enter your offer (e.g. 140)';
       if (orderRecord) {
         const currentLowestRaw = orderRecord.get(ORDER_FIELD_CURRENT_LOWEST_OFFER);
@@ -2097,29 +2172,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
      * afwisseling knop → modal → knop → modal.
      */
     if (interaction.isButton() && interaction.customId === 'claim_start') {
-      const modal = new ModalBuilder()
-        .setCustomId('claim_profile_modal')
-        .setTitle('Link your Seller ID');
-
-      modal.addComponents(
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder()
-            .setCustomId('claim_seller_id')
-            .setLabel('Your Seller ID (numbers only)')
-            .setPlaceholder('00001')
-            .setStyle(TextInputStyle.Short)
-            .setRequired(true)
-        ),
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder()
-            .setCustomId('claim_email')
-            .setLabel('The email on your seller profile')
-            .setStyle(TextInputStyle.Short)
-            .setRequired(true)
-        )
-      );
-
-      await interaction.showModal(modal);
+      await interaction.showModal(buildClaimProfileModal());
       return;
     }
 
@@ -2227,6 +2280,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       // Gekoppeld. Zijn eerdere invoer stond klaar, dus hij kan direct verder
       // met de offer waar hij op vastliep in plaats van opnieuw te beginnen.
+      // De cache zei net nog "niet gevonden"; dat klopt niet meer.
+      forgetSellerLookup(interaction.user.id);
+
       const pending = pendingOffers.get(interaction.user.id);
       pendingOffers.delete(interaction.user.id);
 
@@ -2295,6 +2351,20 @@ client.on(Events.InteractionCreate, async (interaction) => {
           sourceRecord = recs[0] || null;
         }
       } catch (_) {}
+
+      // Zelfde controle als bij de gewone offer-knop: als er nog geen profiel
+      // gekoppeld is, meteen de claim-modal in plaats van de offer-modal.
+      const retrySellerCheck = await lookupSellerCached(interaction.user.id);
+
+      if (retrySellerCheck && !retrySellerCheck.found) {
+        pendingOffers.set(interaction.user.id, {
+          retryCustomId: interaction.customId,
+          at: Date.now()
+        });
+
+        await interaction.showModal(buildClaimProfileModal());
+        return;
+      }
 
       let offerPlaceholder = 'Enter your offer (e.g. 140)';
       if (sourceRecord) {
