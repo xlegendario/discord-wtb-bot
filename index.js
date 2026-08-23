@@ -169,13 +169,55 @@ const PARTNER_FIELD_LAST_POST_AT = 'Last Post At';
 
 const MIN_UNDERCUT_STEP = 2.5;
 
+// Leest een met de hand getypt VAT-type in.
+//
+// Was een exacte, hoofdlettergevoelige vergelijking: wie "margin" of "vat21"
+// typte kreeg een afwijzing, terwijl volstrekt duidelijk was wat hij bedoelde.
+// Discord-modals kennen geen dropdown en geen tekenmasker, dus soepel inlezen
+// is hier de enige manier om die tikfouten weg te nemen.
 function normalizeVatType(raw) {
-  if (!raw) return null;
-  if (raw === 'Margin') return 'Margin';
-  if (raw === 'VAT0') return 'VAT0';
-  if (raw === 'VAT21') return 'VAT21';
+  const clean = String(raw ?? '').toLowerCase().replace(/[\s._-]/g, '');
+
+  if (!clean) return null;
+
+  if (clean === 'margin' || clean === 'marge' || clean === 'm') return 'Margin';
+  if (/^(vat|btw)?21%?$/.test(clean)) return 'VAT21';
+  if (/^(vat|btw)?0+%?$/.test(clean)) return 'VAT0';
+
   return null;
 }
+
+// De portal weet wie bij welk Discord ID hoort en verstuurt de mail voor het
+// claimen van een profiel. Deze bot vraagt het daar op in plaats van bij elke
+// offer een Seller ID uit te vragen.
+async function portalPost(path, body) {
+  if (!KC_PORTAL_BASE_URL || !KC_PORTAL_SECRET) {
+    throw new Error('KC_PORTAL_BASE_URL or KC_PORTAL_SECRET is missing');
+  }
+
+  const response = await fetch(`${KC_PORTAL_BASE_URL.replace(/\/$/, '')}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-kc-secret': KC_PORTAL_SECRET },
+    body: JSON.stringify(body)
+  });
+
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    throw new Error(data.error || `Portal call failed (${response.status})`);
+  }
+
+  return data;
+}
+
+const SUPPORT_CHANNEL_MENTION = '<#1444838494760603769>';
+const PORTAL_SIGNUP_URL = `${String(KC_PORTAL_BASE_URL || 'https://kickzcaviar.com').replace(/\/$/, '')}/signup`;
+
+// Wat iemand had ingevuld toen bleek dat zijn Discord nog nergens aan hangt.
+// Zonder dit zou hij na het claimen opnieuw moeten beginnen, en dan heb je de
+// wrijving verplaatst in plaats van weggehaald. In geheugen: het hoeft een
+// herstart niet te overleven, dan klikt hij gewoon nog een keer.
+const pendingOffers = new Map();
 
 function isVatTypeAllowedForMemberWtbFilter(filter, vatType) {
   const cleanFilter = String(filter || '').trim();
@@ -1654,16 +1696,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       const modal = new ModalBuilder()
         .setCustomId(`seller_offer_modal:${sourceType}:${sourceRecordId || ''}:${messageId}`)
-        .setTitle('Enter Seller ID, VAT & Offer');
+        .setTitle('Your Offer');
 
       modal.addComponents(
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder()
-            .setCustomId('seller_id')
-            .setLabel('Seller ID (e.g. 00001)')
-            .setStyle(TextInputStyle.Short)
-            .setRequired(true)
-        ),
         new ActionRowBuilder().addComponents(
           new TextInputBuilder()
             .setCustomId('vat_type')
@@ -1722,7 +1757,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
           orderId = orderRecord?.id || null;
         }
     
-        const sellerDigits = interaction.fields.getTextInputValue('seller_id').trim();
         // FIXED — this never encoded sourceType/orderId, so the retry
         // button's later re-opened modal always fell back to
         // sourceType="order" (hardcoded default in the modal-submit
@@ -1735,14 +1769,56 @@ client.on(Events.InteractionCreate, async (interaction) => {
             ? `retry_offer:${sourceType}:${orderId || ''}:${interaction.guildId}:${interaction.channelId}:${messageId}`
             : null;
     
-        if (!/^\d+$/.test(sellerDigits)) {
-          const msg = '❌ Seller ID must be digits only.';
-          await interaction.editReply({ content: msg }).catch(() => null);
-          await safeDMWithRetry(interaction.user, `${msg}\n\nYou can try again by clicking the button below.`, retryCustomId);
+        // Wie er biedt volgt nu uit het Discord ID van degene die klikt. Dat
+        // scheelt niet alleen typewerk: vroeger vulde de seller zelf een Seller
+        // ID in en controleerde niemand of dat wel het zijne was, dus kon
+        // iedereen namens elke seller bieden door een nummer te raden.
+        let sellerLookup = null;
+
+        try {
+          sellerLookup = await portalPost('/api/internal/seller-by-discord', {
+            discord_id: interaction.user.id
+          });
+        } catch (lookupErr) {
+          console.error('seller-by-discord failed:', lookupErr);
+
+          await interaction.editReply({
+            content: '⚠️ Could not reach the seller database. Please try again in a moment.'
+          }).catch(() => null);
           return;
         }
-    
-        const sellerCode = `SE-${sellerDigits}`;
+
+        if (!sellerLookup?.found) {
+          pendingOffers.set(interaction.user.id, {
+            retryCustomId,
+            vatTypeRaw: interaction.fields.getTextInputValue('vat_type'),
+            offerRaw: interaction.fields.getTextInputValue('offer_price'),
+            at: Date.now()
+          });
+
+          await interaction.editReply({
+            content: [
+              "You don't have a seller profile linked to this Discord account yet.",
+              '',
+              'Already have a Seller ID? Link it once and you never have to do this again — your offer continues right after.',
+              '',
+              'No Seller ID yet? Create your profile first.'
+            ].join('\n'),
+            components: [
+              {
+                type: 1,
+                components: [
+                  { type: 2, style: 1, label: 'Link my Seller ID', custom_id: 'claim_start' },
+                  { type: 2, style: 5, label: 'Create a profile', url: PORTAL_SIGNUP_URL }
+                ]
+              }
+            ]
+          }).catch(() => null);
+
+          return;
+        }
+
+        const sellerCode = sellerLookup.seller_id;
     
         const vatInput = normalizeVatType(interaction.fields.getTextInputValue('vat_type').trim());
         if (!vatInput) {
@@ -1796,19 +1872,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
     
         const normalizedOffer = getNormalized(offerPrice, vatInput);
 
-        // lookup seller before validation so we can prevent duplicate offers
-        const sellers = await base(sellersTableName)
-          .select({ filterByFormula: `{Seller ID} = "${sellerCode}"`, maxRecords: 1 })
-          .firstPage();
-        
-        const sellerRecordId = sellers[0]?.id;
-        
-        if (!sellerRecordId) {
-          const msg = `❌ Seller ${sellerCode} not found.`;
-          await interaction.editReply({ content: msg }).catch(() => null);
-          await safeDMWithRetry(interaction.user, `${msg}\n\nPlease check your Seller ID and try again by clicking the button below.`, retryCustomId);
+        // Het record ligt al vast via het Discord ID hierboven. Alleen nog
+        // ophalen omdat de VAT-controle hieronder VAT ID en Country nodig heeft.
+        const sellerRecordId = sellerLookup.seller_record_id;
+        const sellerRecordForOffer = await base(sellersTableName).find(sellerRecordId).catch(() => null);
+
+        if (!sellerRecordForOffer) {
+          await interaction.editReply({
+            content: `❌ Your seller profile could not be loaded. Please open a ticket in ${SUPPORT_CHANNEL_MENTION}.`
+          }).catch(() => null);
           return;
         }
+
+        const sellers = [sellerRecordForOffer];
 
         // Block based on the seller's own registration profile (VAT ID +
         // Country): private seller (no VAT ID) → Margin only; Dutch
@@ -2011,6 +2087,172 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     /* ---- RETRY OFFER BUTTON (DM) ---- */
+    /* ---- PROFIEL CLAIMEN ----
+     *
+     * Voor sellers met een Seller ID uit de tijd dat we het Discord ID nog
+     * niet vastlegden. Eenmalig: Seller ID + e-mail, dan een code naar dat
+     * e-mailadres. Daarna is hij bekend en hoeft dit nooit meer.
+     *
+     * Discord staat geen modal toe als antwoord op een modal, vandaar de
+     * afwisseling knop → modal → knop → modal.
+     */
+    if (interaction.isButton() && interaction.customId === 'claim_start') {
+      const modal = new ModalBuilder()
+        .setCustomId('claim_profile_modal')
+        .setTitle('Link your Seller ID');
+
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId('claim_seller_id')
+            .setLabel('Your Seller ID (numbers only)')
+            .setPlaceholder('00001')
+            .setStyle(TextInputStyle.Short)
+            .setRequired(true)
+        ),
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId('claim_email')
+            .setLabel('The email on your seller profile')
+            .setStyle(TextInputStyle.Short)
+            .setRequired(true)
+        )
+      );
+
+      await interaction.showModal(modal);
+      return;
+    }
+
+    if (interaction.isModalSubmit() && interaction.customId === 'claim_profile_modal') {
+      await interaction.deferReply({ ephemeral: true }).catch(() => null);
+
+      const sellerIdInput = interaction.fields.getTextInputValue('claim_seller_id').trim();
+      const emailInput = interaction.fields.getTextInputValue('claim_email').trim();
+
+      let result;
+
+      try {
+        result = await portalPost('/api/internal/claim/start', {
+          discord_id: interaction.user.id,
+          seller_id: sellerIdInput,
+          email: emailInput
+        });
+      } catch (err) {
+        console.error('claim/start failed:', err);
+
+        await interaction.editReply({
+          content: `⚠️ Something went wrong. Please try again, or open a ticket in ${SUPPORT_CHANNEL_MENTION}.`
+        }).catch(() => null);
+        return;
+      }
+
+      if (!result?.ok) {
+        await interaction.editReply({
+          content: `❌ ${result?.error || 'We could not match that Seller ID and email.'}\n\nNeed help? Open a ticket in ${SUPPORT_CHANNEL_MENTION}.`
+        }).catch(() => null);
+        return;
+      }
+
+      await interaction.editReply({
+        content: [
+          `📧 We sent a 6-digit code to **${emailInput}**.`,
+          '',
+          'Enter it below to finish linking. The code expires in 15 minutes.'
+        ].join('\n'),
+        components: [
+          {
+            type: 1,
+            components: [{ type: 2, style: 1, label: 'Enter my code', custom_id: 'claim_code' }]
+          }
+        ]
+      }).catch(() => null);
+
+      return;
+    }
+
+    if (interaction.isButton() && interaction.customId === 'claim_code') {
+      const modal = new ModalBuilder()
+        .setCustomId('claim_code_modal')
+        .setTitle('Enter your code');
+
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId('claim_code_value')
+            .setLabel('6-digit code from your email')
+            .setPlaceholder('123456')
+            .setStyle(TextInputStyle.Short)
+            .setMinLength(6)
+            .setMaxLength(6)
+            .setRequired(true)
+        )
+      );
+
+      await interaction.showModal(modal);
+      return;
+    }
+
+    if (interaction.isModalSubmit() && interaction.customId === 'claim_code_modal') {
+      await interaction.deferReply({ ephemeral: true }).catch(() => null);
+
+      let result;
+
+      try {
+        result = await portalPost('/api/internal/claim/confirm', {
+          discord_id: interaction.user.id,
+          discord_tag: interaction.user.username,
+          code: interaction.fields.getTextInputValue('claim_code_value').trim()
+        });
+      } catch (err) {
+        console.error('claim/confirm failed:', err);
+
+        await interaction.editReply({
+          content: `⚠️ Something went wrong. Please try again, or open a ticket in ${SUPPORT_CHANNEL_MENTION}.`
+        }).catch(() => null);
+        return;
+      }
+
+      if (!result?.ok) {
+        await interaction.editReply({
+          content: `❌ ${result?.error || 'That code is not correct.'}`,
+          components: [
+            {
+              type: 1,
+              components: [{ type: 2, style: 2, label: 'Try again', custom_id: 'claim_code' }]
+            }
+          ]
+        }).catch(() => null);
+        return;
+      }
+
+      // Gekoppeld. Zijn eerdere invoer stond klaar, dus hij kan direct verder
+      // met de offer waar hij op vastliep in plaats van opnieuw te beginnen.
+      const pending = pendingOffers.get(interaction.user.id);
+      pendingOffers.delete(interaction.user.id);
+
+      const lines = [
+        `✅ Linked. Your Seller ID **${result.seller_id}** is now connected to this Discord account.`,
+        '',
+        'You never have to enter it again.'
+      ];
+
+      const components = [];
+
+      if (pending?.retryCustomId) {
+        lines.push('', 'Click below to finish the offer you started.');
+
+        components.push({
+          type: 1,
+          components: [
+            { type: 2, style: 3, label: 'Continue my offer', custom_id: pending.retryCustomId }
+          ]
+        });
+      }
+
+      await interaction.editReply({ content: lines.join('\n'), components }).catch(() => null);
+      return;
+    }
+
     if (interaction.isButton() && interaction.customId.startsWith('retry_offer:')) {
       const parts = interaction.customId.split(':');
 
@@ -2062,16 +2304,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
       const modal = new ModalBuilder()
         .setCustomId(`seller_offer_modal:${sourceType}:${orderId || ''}:${messageId}`)
-        .setTitle('Enter Seller ID, VAT & Offer');
+        .setTitle('Your Offer');
 
       modal.addComponents(
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder()
-            .setCustomId('seller_id')
-            .setLabel('Seller ID (e.g. 00001)')
-            .setStyle(TextInputStyle.Short)
-            .setRequired(true)
-        ),
         new ActionRowBuilder().addComponents(
           new TextInputBuilder()
             .setCustomId('vat_type')
