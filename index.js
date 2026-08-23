@@ -251,6 +251,40 @@ async function lookupSellerCached(discordId) {
   }
 }
 
+
+const NOT_LINKED_EMBED = {
+  title: '⚠️ We could not find your seller profile',
+  description: [
+    "This Discord account isn't connected to a seller profile, so we don't know who's making this offer.",
+    '',
+    "**Sold with us before?** Use *Link my Seller ID* — you'll need your Seller ID and the email on your profile. One time only.",
+    '',
+    "**New here?** Use *Create a profile*. It's one form and then you can offer straight away."
+  ].join('\n'),
+  color: 0xf1c40f
+};
+
+function notLinkedComponents() {
+  return [
+    {
+      type: 1,
+      components: [
+        { type: 2, style: 1, label: 'Link my Seller ID', custom_id: 'claim_start' },
+        { type: 2, style: 5, label: 'Create a profile', url: PORTAL_SIGNUP_URL }
+      ]
+    }
+  ];
+}
+
+async function dmNotLinked(user) {
+  try {
+    await user.send({ embeds: [NOT_LINKED_EMBED], components: notLinkedComponents() });
+  } catch (err) {
+    // DM's uit staan is geen fout; het ephemeral antwoord staat er ook nog.
+    console.warn('Could not DM not-linked notice:', err.message);
+  }
+}
+
 function buildClaimProfileModal() {
   const modal = new ModalBuilder()
     .setCustomId('claim_profile_modal')
@@ -1759,7 +1793,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
           at: Date.now()
         });
 
-        await interaction.showModal(buildClaimProfileModal());
+        await interaction.reply({
+          embeds: [NOT_LINKED_EMBED],
+          components: notLinkedComponents(),
+          ephemeral: true
+        }).catch(() => null);
+
+        await dmNotLinked(interaction.user);
         return;
       }
 
@@ -1872,23 +1912,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
           });
 
           await interaction.editReply({
-            content: [
-              "You don't have a seller profile linked to this Discord account yet.",
-              '',
-              'Already have a Seller ID? Link it once and you never have to do this again — your offer continues right after.',
-              '',
-              'No Seller ID yet? Create your profile first.'
-            ].join('\n'),
-            components: [
-              {
-                type: 1,
-                components: [
-                  { type: 2, style: 1, label: 'Link my Seller ID', custom_id: 'claim_start' },
-                  { type: 2, style: 5, label: 'Create a profile', url: PORTAL_SIGNUP_URL }
-                ]
-              }
-            ]
+            embeds: [NOT_LINKED_EMBED],
+            components: notLinkedComponents()
           }).catch(() => null);
+
+          await dmNotLinked(interaction.user);
 
           return;
         }
@@ -2362,7 +2390,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
           at: Date.now()
         });
 
-        await interaction.showModal(buildClaimProfileModal());
+        await interaction.reply({
+          embeds: [NOT_LINKED_EMBED],
+          components: notLinkedComponents(),
+          ephemeral: true
+        }).catch(() => null);
+
+        await dmNotLinked(interaction.user);
         return;
       }
 
