@@ -273,9 +273,12 @@ const NOT_LINKED_EMBED = {
     '',
     "**Sold with us before?** Use *Link my Seller ID* — you'll need your Seller ID and the email on your profile.",
     '',
-    '**New here?** Use *Create a profile* to sign up.'
+    '**New here?** Use *Create a profile* to sign up.',
+    '',
+    'Neither of these? Open a ticket in <#1444838494760603769> and we will sort it out.'
   ].join('\n'),
-  color: 0xf1c40f
+  // Zelfde geel als de rest van de onboarding-berichten.
+  color: 0xffd300
 };
 
 function notLinkedComponents() {
