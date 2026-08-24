@@ -601,17 +601,33 @@ async function getCurrentLowest(sourceType, recordId, excludeOfferRecordId = nul
   // NEW — additive only: tag which scale this figure is in, so callers
   // can pick the right VAT0 divisor (see vat0CeilingDivisor). This path
   // is a real seller position, i.e. already seller-side.
-  if (best) return { ...best, basis: 'offers' };
+  //
+  // CHANGED - this used to `return best` right here, so as soon as ONE
+  // offer existed the buyer's own maximum was never read again. A
+  // consignment auto-offer above that maximum then became the ceiling and
+  // RAISED the bar instead of lowering it.
+  //
+  // Live case (24-08-2026, ORD-022267): a held consignment offer of EUR 125
+  // VAT21 sat on an order whose Maximum Buying Price was EUR 77,50. The
+  // ceiling became 125 - 2,50 = 122,50 and a seller was allowed to bid
+  // EUR 90 - well above anything that store would ever pay.
+  //
+  // The ceiling is the LOWER of the two: nobody may be told they can bid
+  // above what the buyer will pay, whatever else is on the record. Both
+  // numbers were already available here; the function just stopped early.
+  const bestFromOffers = best ? { ...best, basis: 'offers' } : null;
 
   const record = await getSourceTable(sourceType).find(recordId).catch(() => null);
-  if (!record) return null;
+  if (!record) return bestFromOffers;
 
   const maxPrice =
     parseNumeric(record.get('Current Lowest Source Price')) ??
     parseNumeric(record.get('Maximum Buying Price')) ??
     parseNumeric(record.get('Max Price'));
 
-  if (!Number.isFinite(maxPrice)) return null;
+  // No maximum on the record: fall back to whatever the offers say. This is
+  // the one case where an offer alone still decides the ceiling.
+  if (!Number.isFinite(maxPrice)) return bestFromOffers;
 
   if (normalizeSourceType(sourceType) === 'member_wtb') {
     // FIXED — `?? 10` only catches null/undefined, so a configured
@@ -626,26 +642,40 @@ async function getCurrentLowest(sourceType, recordId, excludeOfferRecordId = nul
       : 10;
     const maxSellerOffer = Math.max(0, maxPrice - offerMargin);
 
-    return {
+    return laagstePlafond(bestFromOffers, {
       normalized: maxSellerOffer,
       raw: maxSellerOffer,
       vatType: 'Margin',
       // Member WTBs have no client — the buyer side is Dutch VAT, so the
       // VAT0 divisor stays 1.21.
       basis: 'member_wtb_max'
-    };
+    });
   }
 
   // Store order, no offers yet: this figure is "Maximum Buying Price",
   // which is all-in in the CLIENT's own VAT scale — not the Dutch one.
   // Carry the client rate so the ceiling can be converted correctly.
-  return {
+  return laagstePlafond(bestFromOffers, {
     normalized: maxPrice,
     raw: maxPrice,
     vatType: 'Margin',
     basis: 'max_buying_price',
     clientVatRate: lookupNumber(record.get('Client VAT Rate'))
-  };
+  });
+}
+
+// The ceiling is whichever of the two is lower. Returning the whole object
+// rather than just the number keeps the basis and the client rate attached,
+// because vat0CeilingDivisor and the error message both need to know WHICH
+// ceiling won - a store maximum and a seller position live on different VAT
+// scales.
+function laagstePlafond(uitBiedingen, uitMaximum) {
+  if (!uitBiedingen) return uitMaximum;
+  if (!uitMaximum) return uitBiedingen;
+
+  return uitBiedingen.normalized <= uitMaximum.normalized
+    ? uitBiedingen
+    : uitMaximum;
 }
 
 async function findExistingSellerOffer(sourceType, recordId, sellerRecordId) {
@@ -1092,6 +1122,15 @@ app.post('/seller-offer/place-from-portal', async (req, res) => {
       const maxAllowedGross = isFirstMemberWtbOffer
         ? lowest.normalized
         : lowest.normalized - MIN_UNDERCUT_STEP;
+
+      // NEW - which ceiling applied is nowhere on the record afterwards, so
+      // a question like "how was this 90 ever accepted?" took half an hour of
+      // reading code and still ended in a guess. One line makes it a lookup.
+      console.log(
+        `⚖️ Ceiling for ${cleanSourceType} ${orderRecordId}: ` +
+        `${maxAllowedGross.toFixed(2)} (basis ${lowest.basis}, raw ${lowest.normalized}) ` +
+        `vs offer ${normalizedOffer.toFixed(2)}`
+      );
 
       if (normalizedOffer > maxAllowedGross + 1e-9) {
         let maxForSeller = maxAllowedGross;
@@ -2037,6 +2076,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
             const maxAllowedGross = isFirstMemberWtbOffer
               ? lowest.normalized
               : lowest.normalized - MIN_UNDERCUT_STEP;
+
+            // Same line as the HTTP route above - both ways in have to be
+            // equally traceable, or you end up trusting the one you can see.
+            console.log(
+              `⚖️ Ceiling for ${sourceType} ${orderId}: ` +
+              `${maxAllowedGross.toFixed(2)} (basis ${lowest.basis}, raw ${lowest.normalized}) ` +
+              `vs offer ${normalizedOffer.toFixed(2)}`
+            );
     
             if (normalizedOffer > maxAllowedGross + 1e-9) {
               const lowestStr = formatLowestForDisplay(lowest);
