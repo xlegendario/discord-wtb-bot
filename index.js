@@ -639,7 +639,7 @@ async function getCurrentLowest(sourceType, recordId, excludeOfferRecordId = nul
     const configuredMargin = parseNumeric(record.get('Offer Margin'));
     const offerMargin = Number.isFinite(configuredMargin) && configuredMargin !== 0
       ? configuredMargin
-      : 10;
+      : CONSIGNMENT_MARKUP;
     const maxSellerOffer = Math.max(0, maxPrice - offerMargin);
 
     return laagstePlafond(bestFromOffers, {
@@ -669,6 +669,22 @@ async function getCurrentLowest(sourceType, recordId, excludeOfferRecordId = nul
 // because vat0CeilingDivisor and the error message both need to know WHICH
 // ceiling won - a store maximum and a seller position live on different VAT
 // scales.
+// What we add on top of a consignor's asking price, in euros.
+//
+// Set CONSIGNMENT_MARKUP to change it; leave it unset and it stays 10,
+// which is what every one of these places had hard-coded before.
+//
+// Changing it only affects NEW deals. A Member WTB writes its margin into
+// "Offer Margin" when it is created, and that snapshot keeps leading for
+// negotiations already running - so a change never moves the goalposts on
+// a consignor mid-conversation.
+const CONSIGNMENT_MARKUP = (() => {
+  const configured = Number(process.env.CONSIGNMENT_MARKUP);
+  return Number.isFinite(configured) && configured > 0 ? configured : 10;
+})();
+
+console.log(`\u{1f4b6} Consignment markup: \u20ac${CONSIGNMENT_MARKUP}`);
+
 function laagstePlafond(uitBiedingen, uitMaximum) {
   if (!uitBiedingen) return uitMaximum;
   if (!uitMaximum) return uitBiedingen;
