@@ -297,7 +297,7 @@ async function dmNotLinked(user) {
   try {
     await user.send({ embeds: [NOT_LINKED_EMBED], components: notLinkedComponents() });
   } catch (err) {
-    // DM's uit staan is geen fout; het ephemeral antwoord staat er ook nog.
+    // Blocked DMs are not an error; the ephemeral reply still lands.
     console.warn('Could not DM not-linked notice:', err.message);
   }
 }
@@ -642,7 +642,7 @@ async function getCurrentLowest(sourceType, recordId, excludeOfferRecordId = nul
       : CONSIGNMENT_MARKUP;
     const maxSellerOffer = Math.max(0, maxPrice - offerMargin);
 
-    return laagstePlafond(bestFromOffers, {
+    return lowestCeiling(bestFromOffers, {
       normalized: maxSellerOffer,
       raw: maxSellerOffer,
       vatType: 'Margin',
@@ -655,7 +655,7 @@ async function getCurrentLowest(sourceType, recordId, excludeOfferRecordId = nul
   // Store order, no offers yet: this figure is "Maximum Buying Price",
   // which is all-in in the CLIENT's own VAT scale — not the Dutch one.
   // Carry the client rate so the ceiling can be converted correctly.
-  return laagstePlafond(bestFromOffers, {
+  return lowestCeiling(bestFromOffers, {
     normalized: maxPrice,
     raw: maxPrice,
     vatType: 'Margin',
@@ -685,13 +685,13 @@ const CONSIGNMENT_MARKUP = (() => {
 
 console.log(`\u{1f4b6} Consignment markup: \u20ac${CONSIGNMENT_MARKUP}`);
 
-function laagstePlafond(uitBiedingen, uitMaximum) {
-  if (!uitBiedingen) return uitMaximum;
-  if (!uitMaximum) return uitBiedingen;
+function lowestCeiling(fromOffers, fromMaximum) {
+  if (!fromOffers) return fromMaximum;
+  if (!fromMaximum) return fromOffers;
 
-  return uitBiedingen.normalized <= uitMaximum.normalized
-    ? uitBiedingen
-    : uitMaximum;
+  return fromOffers.normalized <= fromMaximum.normalized
+    ? fromOffers
+    : fromMaximum;
 }
 
 async function findExistingSellerOffer(sourceType, recordId, sellerRecordId) {
