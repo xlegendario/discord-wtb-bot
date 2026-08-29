@@ -1424,16 +1424,44 @@ app.post('/member-wtb/deal-channel', async (req, res) => {
         ? picture[0].url
         : null;
 
-    const result = await createMemberWtbDealChannel({
-      memberWtbRecord,
-      sellerRecord,
-      sellerOfferRecordId,
-      sellerCode,
-      discordUserId,
-      offerPrice,
-      vatType,
-      imageUrl
-    });
+    // NEW - an offer that comes out of consignment stock gets no channel.
+    //
+    // A consignor already has private channels with us, and a deal on his own
+    // stock is finished through the consignment flow: that writes the pair
+    // off, and the portal sends his Ready To Ship to his Deal Updates
+    // channel. The channel made here would carry a Process Deal button for a
+    // deal that is already done, so it arrives dead - exactly what
+    // MWTB-000402 and MWTB-000404 (29-08-2026) left behind.
+    //
+    // The test is the Seller Offer, not the seller. A consignor who offers on
+    // something he does NOT hold in consignment stock has no row to write off
+    // and no consignment flow to finish it; for him this channel and its
+    // Process Deal button are the only way forward, so he still gets one.
+    //
+    // Decided here rather than at the seven callers in the portal, so the
+    // rule cannot drift between them.
+    const consignmentInventoryId =
+      String(sellerOfferRecord.get('Consignment Inventory ID') || '').trim();
+
+    const result = consignmentInventoryId
+      ? null
+      : await createMemberWtbDealChannel({
+          memberWtbRecord,
+          sellerRecord,
+          sellerOfferRecordId,
+          sellerCode,
+          discordUserId,
+          offerPrice,
+          vatType,
+          imageUrl
+        });
+
+    if (!result) {
+      console.log(
+        `⏭️ No deal channel for ${memberWtbRecordId}: seller offer ${sellerOfferRecordId} ` +
+          `comes from consignment inventory ${consignmentInventoryId}.`
+      );
+    }
 
     await disableSellerOfferMessages(memberWtbRecordId, 'member_wtb');
 
@@ -1445,8 +1473,9 @@ app.post('/member-wtb/deal-channel', async (req, res) => {
       ok: true,
       member_wtb_record_id: memberWtbRecordId,
       seller_offer_record_id: sellerOfferRecordId,
-      channel_id: result.channelId,
-      message_id: result.messageId
+      consignment: Boolean(consignmentInventoryId),
+      channel_id: result ? result.channelId : null,
+      message_id: result ? result.messageId : null
     });
   } catch (err) {
     console.error('Failed to create Member WTB deal channel:', err);
