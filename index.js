@@ -1629,12 +1629,40 @@ client.on(Events.InteractionCreate, async (interaction) => {
     
         await interaction.message.edit({ components: disabledComponents }).catch(() => null);
     
+        // FIXED - this compared against a value the portal never sends.
+        //
+        // handleMemberWtbPaymentGate returns "trusted_payment_requested",
+        // "lojiq_portal_payment", "payment_requested" or "already_processed".
+        // Never "trusted". The test was therefore always true, and even a
+        // trusted buyer's seller was told to wait for a payment that by
+        // definition was never going to hold him up.
+        //
+        // Three outcomes, three different things to say. "Waiting for
+        // payment" is only true for one of them.
         const paymentStatus = data?.payment_gate?.status;
 
-        if (paymentStatus !== "trusted") {
-          await interaction.channel?.send({
-            content: "✅ Deal processed. Waiting for buyer to make the payment."
-          });
+        const waitingCopy = {
+          trusted_payment_requested: null,
+          already_processed: null,
+          // Nothing to say here either. A Lojiq store settles later, in one
+          // payment through its own portal, and the deal deliberately does
+          // not wait for it - the gate sends the Ready To Ship step right
+          // away, same as for a trusted buyer. Adding "waiting for payment"
+          // would contradict the button that just arrived.
+          lojiq_portal_payment: null,
+          payment_requested:
+            "✅ Deal confirmed. Waiting for the buyer to pay. You get the " +
+            "**Request Label** step here the moment the payment comes in."
+        };
+
+        // An unknown status is no reason to say nothing - better a general
+        // line than a seller left staring at a dead channel.
+        const line = paymentStatus in waitingCopy
+          ? waitingCopy[paymentStatus]
+          : "✅ Deal processed. Waiting for buyer to make the payment.";
+
+        if (line) {
+          await interaction.channel?.send({ content: line });
         }
     
         return;
