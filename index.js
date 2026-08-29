@@ -169,12 +169,12 @@ const PARTNER_FIELD_LAST_POST_AT = 'Last Post At';
 
 const MIN_UNDERCUT_STEP = 2.5;
 
-// Leest een met de hand getypt VAT-type in.
+// Reads a hand-typed VAT type.
 //
-// Was een exacte, hoofdlettergevoelige vergelijking: wie "margin" of "vat21"
-// typte kreeg een afwijzing, terwijl volstrekt duidelijk was wat hij bedoelde.
-// Discord-modals kennen geen dropdown en geen tekenmasker, dus soepel inlezen
-// is hier de enige manier om die tikfouten weg te nemen.
+// This was an exact, case-sensitive comparison: anyone typing "margin" or
+// "vat21" was refused, while what they meant was perfectly clear. Discord
+// modals have no dropdown and no input mask, so reading leniently is the only
+// way to take those typos out.
 function normalizeVatType(raw) {
   const clean = String(raw ?? '').toLowerCase().replace(/[\s._-]/g, '');
 
@@ -187,14 +187,14 @@ function normalizeVatType(raw) {
   return null;
 }
 
-// De portal weet wie bij welk Discord ID hoort en verstuurt de mail voor het
-// claimen van een profiel. Deze bot vraagt het daar op in plaats van bij elke
-// offer een Seller ID uit te vragen.
+// The portal knows which seller belongs to which Discord ID and sends the
+// mail for claiming a profile. This bot asks it there instead of requesting a
+// Seller ID on every offer.
 
-// Zonder deze twee valt de seller-lookup stil terug op de oude route: de
-// gebruiker krijgt dan alsnog het offerformulier en pas bij het versturen te
-// horen dat er iets mis is. Die terugval is met opzet (een platte portal mag
-// niet alles blokkeren), maar een ontbrekende env-var hoort zichtbaar te zijn.
+// Without these two the seller lookup falls back silently to the old route:
+// the user still gets the offer form and only hears something is wrong on
+// submit. That fallback is deliberate (a portal being down must not block
+// everything), but a missing env var should be visible.
 if (!KC_PORTAL_SECRET) {
   console.error(
     '❌ KC_PORTAL_SECRET ontbreekt — seller-lookup en profiel claimen werken niet. ' +
@@ -227,15 +227,15 @@ async function portalPost(path, body) {
 const SUPPORT_CHANNEL_MENTION = '<#1444838494760603769>';
 const PORTAL_SIGNUP_URL = `${String(KC_PORTAL_BASE_URL || 'https://kickzcaviar.com').replace(/\/$/, '')}/signup`;
 
-// Wat iemand had ingevuld toen bleek dat zijn Discord nog nergens aan hangt.
-// Zonder dit zou hij na het claimen opnieuw moeten beginnen, en dan heb je de
-// wrijving verplaatst in plaats van weggehaald. In geheugen: het hoeft een
-// herstart niet te overleven, dan klikt hij gewoon nog een keer.
+// What someone had filled in when it turned out their Discord was not linked
+// to anything yet. Without this they would start over after claiming, which
+// moves the friction rather than removing it. Held in memory: it does not need
+// to survive a restart, they simply click again.
 const pendingOffers = new Map();
 
-// Discord geeft drie seconden om op een knopklik te antwoorden, en showModal
-// kan niet uitgesteld worden. Een korte cache houdt de veelvoorkomende klik
-// (bekende seller) op nul netwerkverkeer.
+// Discord gives three seconds to answer a button click, and showModal cannot
+// be deferred. A short cache keeps the common case - a known seller - at zero
+// network traffic.
 const sellerLookupCache = new Map();
 const SELLER_LOOKUP_TTL_MS = 5 * 60 * 1000;
 
@@ -243,9 +243,9 @@ function forgetSellerLookup(discordId) {
   sellerLookupCache.delete(discordId);
 }
 
-// Geeft het lookup-resultaat terug, of null als het niet op tijd lukte. Bij
-// null gaat de aanroeper gewoon door met de offer-modal: de submit-handler
-// vangt het dan alsnog af, zoals voorheen.
+// Returns the lookup result, or null if it did not finish in time. On null
+// the caller simply continues with the offer modal: the submit handler catches
+// it after all, exactly as before.
 async function lookupSellerCached(discordId) {
   const cached = sellerLookupCache.get(discordId);
 
@@ -277,7 +277,7 @@ const NOT_LINKED_EMBED = {
     '',
     'Neither of these? Open a ticket in <#1444838494760603769> and we will sort it out.'
   ].join('\n'),
-  // Zelfde geel als de rest van de onboarding-berichten.
+  // The same yellow as the rest of the onboarding messages.
   color: 0xffd300
 };
 
@@ -1909,11 +1909,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
         orderRecord = recs[0] || null;
       } catch (_) {}
 
-      // Nog geen gekoppeld profiel? Dan meteen de claim-modal openen in
-      // plaats van de offer-modal. Dit moet hier gebeuren en niet bij het
-      // versturen: Discord staat geen modal toe als antwoord op een modal, dus
-      // daar rest alleen een ephemeral bericht — en dat verschijnt onderaan het
-      // kanaal, waar het over het hoofd gezien wordt.
+      // No linked profile yet? Then open the claim modal straight away instead
+      // of the offer modal. This has to happen here and not on submit: Discord
+      // allows no modal in reply to a modal, so there only an ephemeral message
+      // is left - and that appears at the bottom of the channel, where it gets
+      // overlooked.
       const sellerCheck = await lookupSellerCached(interaction.user.id);
 
       if (sellerCheck && !sellerCheck.found) {
@@ -2013,10 +2013,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
             ? `retry_offer:${sourceType}:${orderId || ''}:${interaction.guildId}:${interaction.channelId}:${messageId}`
             : null;
     
-        // Wie er biedt volgt nu uit het Discord ID van degene die klikt. Dat
-        // scheelt niet alleen typewerk: vroeger vulde de seller zelf een Seller
-        // ID in en controleerde niemand of dat wel het zijne was, dus kon
-        // iedereen namens elke seller bieden door een nummer te raden.
+        // Who is bidding now follows from the Discord ID of whoever clicked.
+        // That saves more than typing: the seller used to fill in a Seller ID
+        // themselves and nobody checked it was theirs, so anyone could bid on
+        // behalf of any seller by guessing a number.
         let sellerLookup = null;
 
         try {
@@ -2104,8 +2104,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     
         const normalizedOffer = getNormalized(offerPrice, vatInput);
 
-        // Het record ligt al vast via het Discord ID hierboven. Alleen nog
-        // ophalen omdat de VAT-controle hieronder VAT ID en Country nodig heeft.
+        // The record is already fixed by the Discord ID above. Fetched only
+        // because the VAT check below needs VAT ID and Country.
         const sellerRecordId = sellerLookup.seller_record_id;
         const sellerRecordForOffer = await base(sellersTableName).find(sellerRecordId).catch(() => null);
 
@@ -2327,14 +2327,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     /* ---- RETRY OFFER BUTTON (DM) ---- */
-    /* ---- PROFIEL CLAIMEN ----
+    /* ---- CLAIM PROFILE ----
      *
-     * Voor sellers met een Seller ID uit de tijd dat we het Discord ID nog
-     * niet vastlegden. Eenmalig: Seller ID + e-mail, dan een code naar dat
-     * e-mailadres. Daarna is hij bekend en hoeft dit nooit meer.
+     * For sellers with a Seller ID from before we recorded the Discord ID.
+     * One time only: Seller ID plus email, then a code to that address. After
+     * that they are known and never need this again.
      *
-     * Discord staat geen modal toe als antwoord op een modal, vandaar de
-     * afwisseling knop → modal → knop → modal.
+     * Discord allows no modal in reply to a modal, hence the alternation
+     * button -> modal -> button -> modal.
      */
     if (interaction.isButton() && interaction.customId === 'claim_start') {
       await interaction.showModal(buildClaimProfileModal());
@@ -2443,9 +2443,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
 
-      // Gekoppeld. Zijn eerdere invoer stond klaar, dus hij kan direct verder
-      // met de offer waar hij op vastliep in plaats van opnieuw te beginnen.
-      // De cache zei net nog "niet gevonden"; dat klopt niet meer.
+      // Linked. Their earlier input was kept, so they can carry straight on
+      // with the offer they got stuck on instead of starting over. The cache
+      // still says "not found"; that is no longer true.
       forgetSellerLookup(interaction.user.id);
 
       const pending = pendingOffers.get(interaction.user.id);
@@ -2517,8 +2517,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
       } catch (_) {}
 
-      // Zelfde controle als bij de gewone offer-knop: als er nog geen profiel
-      // gekoppeld is, meteen de claim-modal in plaats van de offer-modal.
+      // Same check as on the normal offer button: with no profile linked yet,
+      // straight to the claim modal instead of the offer modal.
       const retrySellerCheck = await lookupSellerCached(interaction.user.id);
 
       if (retrySellerCheck && !retrySellerCheck.found) {
