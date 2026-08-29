@@ -1424,44 +1424,30 @@ app.post('/member-wtb/deal-channel', async (req, res) => {
         ? picture[0].url
         : null;
 
-    // NEW - an offer that comes out of consignment stock gets no channel.
+    // REVERTED - this used to skip the channel when the Seller Offer carried
+    // a Consignment Inventory ID, on the reasoning that a consignment deal is
+    // finished through the consignment flow and the channel would arrive dead.
     //
-    // A consignor already has private channels with us, and a deal on his own
-    // stock is finished through the consignment flow: that writes the pair
-    // off, and the portal sends his Ready To Ship to his Deal Updates
-    // channel. The channel made here would carry a Process Deal button for a
-    // deal that is already done, so it arrives dead - exactly what
-    // MWTB-000402 and MWTB-000404 (29-08-2026) left behind.
+    // That reads the wrong thing. Whether stock is consignment-backed says
+    // nothing about WHICH flow is settling this deal. A buyer accepting a
+    // Member WTB seller offer comes through here, and for that path the
+    // channel and its Process Deal button ARE the mechanism - even when the
+    // seller happens to hold the pair in consignment.
     //
-    // The test is the Seller Offer, not the seller. A consignor who offers on
-    // something he does NOT hold in consignment stock has no row to write off
-    // and no consignment flow to finish it; for him this channel and its
-    // Process Deal button are the only way forward, so he still gets one.
-    //
-    // Decided here rather than at the seven callers in the portal, so the
-    // rule cannot drift between them.
-    const consignmentInventoryId =
-      String(sellerOfferRecord.get('Consignment Inventory ID') || '').trim();
-
-    const result = consignmentInventoryId
-      ? null
-      : await createMemberWtbDealChannel({
-          memberWtbRecord,
-          sellerRecord,
-          sellerOfferRecordId,
-          sellerCode,
-          discordUserId,
-          offerPrice,
-          vatType,
-          imageUrl
-        });
-
-    if (!result) {
-      console.log(
-        `⏭️ No deal channel for ${memberWtbRecordId}: seller offer ${sellerOfferRecordId} ` +
-          `comes from consignment inventory ${consignmentInventoryId}.`
-      );
-    }
+    // MWTB-000390 (29-08-2026) proved it within the hour: Fulfillment Status
+    // went to Confirmed, no channel was made, and nothing could move the deal
+    // on. Whoever tries this again: the caller knows which flow it is in, the
+    // Seller Offer does not.
+    const result = await createMemberWtbDealChannel({
+      memberWtbRecord,
+      sellerRecord,
+      sellerOfferRecordId,
+      sellerCode,
+      discordUserId,
+      offerPrice,
+      vatType,
+      imageUrl
+    });
 
     await disableSellerOfferMessages(memberWtbRecordId, 'member_wtb');
 
@@ -1473,9 +1459,8 @@ app.post('/member-wtb/deal-channel', async (req, res) => {
       ok: true,
       member_wtb_record_id: memberWtbRecordId,
       seller_offer_record_id: sellerOfferRecordId,
-      consignment: Boolean(consignmentInventoryId),
-      channel_id: result ? result.channelId : null,
-      message_id: result ? result.messageId : null
+      channel_id: result.channelId,
+      message_id: result.messageId
     });
   } catch (err) {
     console.error('Failed to create Member WTB deal channel:', err);
