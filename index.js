@@ -620,6 +620,18 @@ async function getCurrentLowest(sourceType, recordId, excludeOfferRecordId = nul
   const record = await getSourceTable(sourceType).find(recordId).catch(() => null);
   if (!record) return bestFromOffers;
 
+  // A store order can be opened above its maximum from the admin portal
+  // (Open Orders, "Allow Offers Above Max?"): too many deals were missed by
+  // a few euro. The maximum then stops being a ceiling, but a new offer still
+  // has to undercut the other sellers - so with no offers yet there is no
+  // limit, and the store decides whether to pay it.
+  if (
+    normalizeSourceType(sourceType) !== 'member_wtb' &&
+    record.get('Allow Offers Above Max?') === true
+  ) {
+    return bestFromOffers;
+  }
+
   const maxPrice =
     parseNumeric(record.get('Current Lowest Source Price')) ??
     parseNumeric(record.get('Maximum Buying Price')) ??
