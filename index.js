@@ -16,7 +16,8 @@ import {
   TextInputStyle,
   Events,
   PermissionsBitField,
-  MessageFlags
+  MessageFlags,
+  ChannelType
 } from 'discord.js';
 
 
@@ -1286,13 +1287,36 @@ app.post('/seller-offer/disable', async (req, res) => {
 
 /* ---------------- POST /payout-channel ---------------- */
 
+// PAYOUT_CATEGORY_ID may hold several comma-separated category IDs; the first one
+// with room is used (Discord allows max 50 channels per category).
+const PAYOUT_CATEGORY_IDS = String(PAYOUT_CATEGORY_ID || '')
+  .split(',')
+  .map((id) => id.trim())
+  .filter(Boolean);
+
+async function pickPayoutCategoryWithSpace() {
+  const MAX = 50;
+  for (const id of PAYOUT_CATEGORY_IDS) {
+    const cat = await client.channels.fetch(id).catch(() => null);
+    if (!cat || cat.type !== ChannelType.GuildCategory) {
+      console.warn(`Payout category ${id} not found or not a category`);
+      continue;
+    }
+    await cat.guild.channels.fetch();
+    const used = cat.guild.channels.cache.filter((ch) => ch.parentId === cat.id).size;
+    if (used < MAX) return cat;
+  }
+  console.error(`All payout categories are full: ${PAYOUT_CATEGORY_IDS.join(', ')}`);
+  return null;
+}
+
 app.post('/payout-channel', async (req, res) => {
   try {
     const { orderId, productName, sku, size, brand, payout, sellerCode, imageUrl, discordUserId, vatType } =
       req.body || {};
 
-    const category = await client.channels.fetch(PAYOUT_CATEGORY_ID).catch(() => null);
-    if (!category || !category.guild) return res.status(500).json({ error: 'Invalid payout category' });
+    const category = await pickPayoutCategoryWithSpace();
+    if (!category) return res.status(500).json({ error: 'No payout category with space left' });
 
     const guild = category.guild;
 
